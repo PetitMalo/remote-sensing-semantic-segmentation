@@ -1,0 +1,25 @@
+[project]
+name = "remote-sensing-semantic-segmentation"
+version = "0.1.0"
+description = "A remote sensing semantic segmentation project."
+readme = "README.md"
+authors = [
+    { name = "Maël Dacher", email = "mael.dacher.90@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = []
+
+[project.scripts]
+remote-sensing-semantic-segmentation = "remote_sensing_semantic_segmentation:main"
+
+[build-system]
+requires = ["uv_build>=0.13.0,<0.14.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pre-commit>=4.7.0",
+    "pytest>=9.1.1",
+    "ruff>=0.17.0",
+    "ty>=0.0.87",
+]
