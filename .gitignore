@@ -19,4 +19,4 @@ venv/
 *.swp
 
 # --- Data ---
-data/
+/data/
