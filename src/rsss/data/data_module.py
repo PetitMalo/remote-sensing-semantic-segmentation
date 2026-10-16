@@ -3,7 +3,7 @@ from __future__ import annotations
 from pytorch_lightning import LightningDataModule
 from torch.utils.data import DataLoader
 
-from remote_sensing_semantic_segmentation.data.data_loader import (
+from rsss.data.data_loader import (
     discover_data,
     fit_dataset,
     predict_dataset,
