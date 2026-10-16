@@ -16,13 +16,25 @@ repos:
       - id: check-added-large-files
         args: [--maxkb=500]   # keeps data and weights out of git
 
+  # --- Notebooks ---
+  # Strip cell outputs, execution counts and stray metadata so diffs stay
+  # readable and the repo stays small. Runs on every .ipynb file.
+  - repo: https://github.com/kynan/nbstripout
+    rev: 0.9.1
+    hooks:
+      - id: nbstripout
+
   # --- Lint + format ---
+  # ruff lints and formats notebook code cells natively, so notebooks go
+  # through the same rules as the rest of the Python source.
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.17.0
     hooks:
       - id: ruff
         args: [--fix]
+        types_or: [python, pyi, jupyter]
       - id: ruff-format
+        types_or: [python, pyi, jupyter]
 
   # --- Conventional commits ---
   - repo: https://github.com/compilerla/conventional-pre-commit
