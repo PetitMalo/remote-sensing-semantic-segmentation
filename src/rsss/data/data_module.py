@@ -4,6 +4,7 @@ from pytorch_lightning import LightningDataModule
 from torch.utils.data import DataLoader
 
 from rsss.data.data_loader import (
+    Augmentation,
     FitDataset,
     PredictDataset,
 )
@@ -32,7 +33,7 @@ class FlairDatamodule(LightningDataModule):
         start_one: bool = True,
         channels: list | None = None,
         use_metadata: bool = True,
-        use_augmentations: bool = False,
+        use_augmentations: Augmentation | None = None,
         norm_type: str = "scaling",
         means: list | None = None,
         stds: list | None = None,
@@ -98,7 +99,9 @@ class FlairDatamodule(LightningDataModule):
             )
         return files
 
-    def _make_fit_dataset(self, dict_files: dict, use_augmentations=None) -> FitDataset:
+    def _make_fit_dataset(
+        self, dict_files: dict, use_augmentations: Augmentation | None = None
+    ) -> FitDataset:
         return FitDataset(
             dict_files=dict_files,
             channels=self.channels,
