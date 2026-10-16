@@ -17,3 +17,6 @@ venv/
 # --- Editors / OS ---
 .vscode/
 *.swp
+
+# --- Data ---
+/data/
