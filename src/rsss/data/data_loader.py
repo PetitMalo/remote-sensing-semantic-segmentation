@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from pathlib import Path
 
 import numpy as np
@@ -5,6 +6,10 @@ import rasterio
 import torch
 from skimage.util import img_as_float
 from torch.utils.data import Dataset
+
+# Albumentations-style augmentation: called with the sample as keyword
+# arguments ("image" and "mask") and returns a mapping with the same keys.
+Augmentation = Callable[..., dict]
 
 
 def norm(
@@ -153,7 +158,7 @@ class FitDataset(Dataset):
         num_classes: int = 13,
         start_one: bool = True,
         use_metadata: bool = False,
-        use_augmentations=None,
+        use_augmentations: Augmentation | None = None,
         norm_type: str = "scaling",
         means: list | None = None,
         stds: list | None = None,
