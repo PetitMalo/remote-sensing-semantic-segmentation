@@ -4,13 +4,13 @@ from pytorch_lightning import LightningDataModule
 from torch.utils.data import DataLoader
 
 from rsss.data.data_loader import (
+    FitDataset,
+    PredictDataset,
     discover_data,
-    fit_dataset,
-    predict_dataset,
 )
 
 
-class flair_datamodule(LightningDataModule):
+class FlairDatamodule(LightningDataModule):
     def __init__(
         self,
         data_dir: str = "data",
@@ -58,7 +58,7 @@ class flair_datamodule(LightningDataModule):
         # Determine dict_files for each stage
         if stage == "fit" or stage == "validate":
             if self.dict_train is not None:
-                self.train_dataset = fit_dataset(
+                self.train_dataset = FitDataset(
                     dict_files=self.dict_train,
                     channels=self.channels,
                     num_classes=self.num_classes,
@@ -71,8 +71,8 @@ class flair_datamodule(LightningDataModule):
                 )
             else:
                 # Auto-discover training data from data_dir
-                self.train_dataset = fit_dataset(
-                    dict_files=discover_data(self.data_dir, include_sentinel=True),
+                self.train_dataset = FitDataset(
+                    dict_files=discover_data(self.data_dir),
                     channels=self.channels,
                     num_classes=self.num_classes,
                     start_one=self.start_one,
@@ -84,7 +84,7 @@ class flair_datamodule(LightningDataModule):
                 )
 
             if self.dict_val is not None:
-                self.val_dataset = fit_dataset(
+                self.val_dataset = FitDataset(
                     dict_files=self.dict_val,
                     channels=self.channels,
                     num_classes=self.num_classes,
@@ -102,8 +102,8 @@ class flair_datamodule(LightningDataModule):
                 # as training and leave val empty, or we could use a second area.
                 # For this adaptation, we'll use discover_data for val as well,
                 # but in practice users should provide dict_train/dict_val.
-                self.val_dataset = fit_dataset(
-                    dict_files=discover_data(self.data_dir, include_sentinel=True),
+                self.val_dataset = FitDataset(
+                    dict_files=discover_data(self.data_dir),
                     channels=self.channels,
                     num_classes=self.num_classes,
                     start_one=self.start_one,
@@ -115,7 +115,7 @@ class flair_datamodule(LightningDataModule):
 
         elif stage == "predict":
             if self.dict_test is not None:
-                self.pred_dataset = predict_dataset(
+                self.pred_dataset = PredictDataset(
                     dict_files=self.dict_test,
                     channels=self.channels,
                     num_classes=self.num_classes,
@@ -126,8 +126,8 @@ class flair_datamodule(LightningDataModule):
                 )
             else:
                 # Auto-discover test/prediction data from data_dir
-                self.pred_dataset = predict_dataset(
-                    dict_files=discover_data(self.data_dir, include_sentinel=True),
+                self.pred_dataset = PredictDataset(
+                    dict_files=discover_data(self.data_dir),
                     channels=self.channels,
                     num_classes=self.num_classes,
                     use_metadata=self.use_metadata,

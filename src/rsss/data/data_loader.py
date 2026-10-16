@@ -1,4 +1,4 @@
-import os
+from pathlib import Path
 
 import numpy as np
 import rasterio
@@ -12,24 +12,32 @@ def norm(
     norm_type: str | None = None,
     means: list | None = None,
     stds: list | None = None,
-):
-    """Normalize image array.
+) -> np.ndarray:
+    """Normalize an image array.
 
     Parameters
     ----------
     in_img : np.ndarray
-        Input image array.
+        Input image array, shaped (bands, height, width).
     norm_type : str, optional
         Normalization type. One of 'scaling', 'custom', 'without'.
     means : list, optional
-        Mean values for 'custom' normalization.
+        Per-band means, used by 'custom'.
     stds : list, optional
-        Std values for 'custom' normalization.
+        Per-band stds, used by 'custom'.
 
     Returns
     -------
     np.ndarray
         Normalized image.
+
+    Notes
+    -----
+    'scaling' only rescales by the range of the input dtype: a uint8 array is
+    divided by 255 and mapped to [0, 1]. It does not standardize to mean 0 /
+    std 1. Backbones pre-trained with specific statistics (DINOv2, DINOv3)
+    need 'custom' with the statistics they were trained with. 'without'
+    returns the input unchanged.
     """
     if norm_type not in ["scaling", "custom", "without"]:
         raise ValueError(
@@ -54,7 +62,7 @@ def norm(
     return in_img
 
 
-def discover_data(data_dir: str, include_sentinel: bool = True) -> dict:
+def discover_data(data_dir: str) -> dict[str, list[str]]:
     """Discover IMG and MSK file paths from the data directory structure.
 
     Expected structure under data_dir:
@@ -65,76 +73,58 @@ def discover_data(data_dir: str, include_sentinel: bool = True) -> dict:
             labels/
                 <tile>/
                     MSK_*.tif
-            sentinel/           (optional, if include_sentinel=True)
-                <tile>/
-                    SEN2_sp_<area>-<tile>_data.npy
-                    SEN2_sp_<area>-<tile>_masks.npy
+
+    Areas missing either an ``aerial/`` or a ``labels/`` directory are skipped,
+    as are any non-directory entries at the root. Sentinel ``.npy`` files are
+    deliberately not discovered: nothing in the datasets can consume them yet,
+    so returning them would only advertise metadata that is silently dropped.
 
     Parameters
     ----------
     data_dir : str
-        Root directory containing area subdirectories (e.g., "data/").
-    include_sentinel : bool, default True
-        Whether to include sentinel .npy metadata.
+        Root directory containing area subdirectories (e.g. "data/").
 
     Returns
     -------
-    dict
-        Dictionary with keys "IMG", "MSK", and optionally "MTD" (as empty list;
-        sentinel data is loaded separately via npy files if needed).
-    """
-    img_files = []
-    msk_files = []
-    mtd_files = []  # placeholder for metadata; sentinel data loaded via npy
+    dict[str, list[str]]
+        Dictionary with keys "IMG" and "MSK", each a sorted list of paths.
 
-    if not os.path.isdir(data_dir):
+    Raises
+    ------
+    FileNotFoundError
+        If data_dir does not exist.
+    """
+    root = Path(data_dir)
+    if not root.is_dir():
         raise FileNotFoundError(f"Data directory not found: {data_dir}")
 
-    areas = sorted(
-        [d for d in os.listdir(data_dir) if os.path.isdir(os.path.join(data_dir, d))]
-    )
+    img_files: list[str] = []
+    msk_files: list[str] = []
 
-    for area in areas:
-        area_path = os.path.join(data_dir, area)
-        aerial_dir = os.path.join(area_path, "aerial")
-        labels_dir = os.path.join(area_path, "labels")
+    for area in sorted(path for path in root.iterdir() if path.is_dir()):
+        aerial_dir = area / "aerial"
+        labels_dir = area / "labels"
 
-        if not os.path.isdir(aerial_dir) or not os.path.isdir(labels_dir):
+        if not aerial_dir.is_dir() or not labels_dir.is_dir():
             continue
 
-        tiles = sorted(
-            [
-                d
-                for d in os.listdir(aerial_dir)
-                if os.path.isdir(os.path.join(aerial_dir, d))
-            ]
-        )
+        for tile_aerial in sorted(
+            path for path in aerial_dir.iterdir() if path.is_dir()
+        ):
+            img_files.extend(
+                str(path) for path in sorted(tile_aerial.glob("IMG_*.tif"))
+            )
 
-        for tile in tiles:
-            tile_aerial = os.path.join(aerial_dir, tile)
-            tile_labels = os.path.join(labels_dir, tile)
+            tile_labels = labels_dir / tile_aerial.name
+            if tile_labels.is_dir():
+                msk_files.extend(
+                    str(path) for path in sorted(tile_labels.glob("MSK_*.tif"))
+                )
 
-            if os.path.isdir(tile_aerial):
-                for fname in sorted(os.listdir(tile_aerial)):
-                    if fname.startswith("IMG_") and fname.endswith(".tif"):
-                        img_files.append(os.path.join(tile_aerial, fname))
-
-            if os.path.isdir(tile_labels):
-                for fname in sorted(os.listdir(tile_labels)):
-                    if fname.startswith("MSK_") and fname.endswith(".tif"):
-                        msk_files.append(os.path.join(tile_labels, fname))
-
-    dict_files = {
-        "IMG": img_files,
-        "MSK": msk_files,
-    }
-    if include_sentinel:
-        dict_files["MTD"] = mtd_files
-
-    return dict_files
+    return {"IMG": img_files, "MSK": msk_files}
 
 
-class fit_dataset(Dataset):
+class FitDataset(Dataset):
     def __init__(
         self,
         dict_files: dict,
@@ -213,7 +203,7 @@ class fit_dataset(Dataset):
             }
 
 
-class predict_dataset(Dataset):
+class PredictDataset(Dataset):
     def __init__(
         self,
         dict_files: dict,
@@ -232,7 +222,7 @@ class predict_dataset(Dataset):
         self.num_classes = num_classes
         self.use_metadata = use_metadata
         if use_metadata == True:
-            self.list_metadata = np.array(dict_files["MTD"])
+            self.list_metadata = np.array(dict_files.get("MTD", []))
         self.channels = channels
         self.norm_type = norm_type
         self.means = means
