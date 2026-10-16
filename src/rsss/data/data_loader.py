@@ -62,6 +62,23 @@ def norm(
     return in_img
 
 
+def _assert_paired(area: str, tile: str, imgs: list[Path], msks: list[Path]) -> None:
+    """Ensure IMG and MSK tiles correspond, so the two file lists stay aligned.
+
+    IMG and MSK are collected by two independent globs. Without this check an
+    unpaired tile would silently shift every following pair out of sync.
+    """
+    img_keys = {path.name[len("IMG_") :] for path in imgs}
+    msk_keys = {path.name[len("MSK_") :] for path in msks}
+    if img_keys != msk_keys:
+        missing_msk = sorted(img_keys - msk_keys)
+        missing_img = sorted(msk_keys - img_keys)
+        raise ValueError(
+            f"Unpaired tiles in {area}/{tile}: "
+            f"missing MSK for {missing_msk}, missing IMG for {missing_img}."
+        )
+
+
 def discover_data(data_dir: str) -> dict[str, list[str]]:
     """Discover IMG and MSK file paths from the data directory structure.
 
@@ -87,12 +104,17 @@ def discover_data(data_dir: str) -> dict[str, list[str]]:
     Returns
     -------
     dict[str, list[str]]
-        Dictionary with keys "IMG" and "MSK", each a sorted list of paths.
+        Dictionary with keys "IMG" and "MSK", each a sorted list of paths. The
+        two lists are index-aligned: ``IMG[i]`` and ``MSK[i]`` are the same
+        tile.
 
     Raises
     ------
     FileNotFoundError
         If data_dir does not exist.
+    ValueError
+        If an ``IMG_*.tif`` has no matching ``MSK_*.tif`` (or vice versa) within
+        a tile directory.
     """
     root = Path(data_dir)
     if not root.is_dir():
@@ -111,15 +133,14 @@ def discover_data(data_dir: str) -> dict[str, list[str]]:
         for tile_aerial in sorted(
             path for path in aerial_dir.iterdir() if path.is_dir()
         ):
-            img_files.extend(
-                str(path) for path in sorted(tile_aerial.glob("IMG_*.tif"))
-            )
+            imgs = sorted(tile_aerial.glob("IMG_*.tif"))
 
             tile_labels = labels_dir / tile_aerial.name
-            if tile_labels.is_dir():
-                msk_files.extend(
-                    str(path) for path in sorted(tile_labels.glob("MSK_*.tif"))
-                )
+            msks = sorted(tile_labels.glob("MSK_*.tif")) if tile_labels.is_dir() else []
+
+            _assert_paired(area.name, tile_aerial.name, imgs, msks)
+            img_files.extend(str(path) for path in imgs)
+            msk_files.extend(str(path) for path in msks)
 
     return {"IMG": img_files, "MSK": msk_files}
 
