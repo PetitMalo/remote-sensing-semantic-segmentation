@@ -27,7 +27,7 @@ Run lint, types and tests before declaring any task done.
 - Reuse before writing: check `src/` for an existing helper first
 - No premature abstraction: three similar lines beat a speculative framework
 - Config in YAML files, never hard-coded paths or hyperparameters
-- Every new function gets a pytest test in `tests/` (mirror the `src/rsss` layout)
+- Every new function gets a pytest test in `tests/` (mirror the `src/rsss/` layout)
 
 ## Git workflow
 - Never commit to `main`. One feature branch per task: `feat/...`, `fix/...`
