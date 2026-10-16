@@ -6,11 +6,19 @@ from torch.utils.data import DataLoader
 from rsss.data.data_loader import (
     FitDataset,
     PredictDataset,
-    discover_data,
 )
+from rsss.data.splits import build_flair_splits
 
 
 class FlairDatamodule(LightningDataModule):
+    """Lightning data module for the FLAIR aerial/label pairs.
+
+    When ``dict_train``, ``dict_val`` or ``dict_test`` is omitted, the matching
+    split is derived from the official FLAIR#1 domain split via
+    :func:`rsss.data.splits.build_flair_splits`. A split that ends up empty
+    raises, rather than silently reusing another split's data.
+    """
+
     def __init__(
         self,
         data_dir: str = "data",
@@ -50,91 +58,82 @@ class FlairDatamodule(LightningDataModule):
         self.norm_type = norm_type
         self.means = means
         self.stds = stds
+        # Official FLAIR#1 split, built lazily from data_dir and reused across
+        # stages so a single discovery pass serves every omitted dict.
+        self._splits: dict[str, dict[str, list[str]]] | None = None
 
-    def prepare_data(self):
+    def prepare_data(self) -> None:
         pass
 
-    def setup(self, stage=None):
-        # Determine dict_files for each stage
-        if stage == "fit" or stage == "validate":
-            if self.dict_train is not None:
-                self.train_dataset = FitDataset(
-                    dict_files=self.dict_train,
-                    channels=self.channels,
-                    num_classes=self.num_classes,
-                    start_one=self.start_one,
-                    use_metadata=self.use_metadata,
-                    use_augmentations=self.use_augmentations,
-                    norm_type=self.norm_type,
-                    means=self.means,
-                    stds=self.stds,
-                )
-            else:
-                # Auto-discover training data from data_dir
-                self.train_dataset = FitDataset(
-                    dict_files=discover_data(self.data_dir),
-                    channels=self.channels,
-                    num_classes=self.num_classes,
-                    start_one=self.start_one,
-                    use_metadata=self.use_metadata,
-                    use_augmentations=self.use_augmentations,
-                    norm_type=self.norm_type,
-                    means=self.means,
-                    stds=self.stds,
-                )
+    def _flair_splits(self) -> dict[str, dict[str, list[str]]]:
+        """Return the official FLAIR#1 split, discovering it once."""
+        if self._splits is None:
+            self._splits = build_flair_splits(self.data_dir)
+        return self._splits
 
-            if self.dict_val is not None:
-                self.val_dataset = FitDataset(
-                    dict_files=self.dict_val,
-                    channels=self.channels,
-                    num_classes=self.num_classes,
-                    start_one=self.start_one,
-                    use_metadata=self.use_metadata,
-                    norm_type=self.norm_type,
-                    means=self.means,
-                    stds=self.stds,
-                )
-            else:
-                # Auto-discover validation data from data_dir (hold-out from train)
-                # For now, use a subset or the same area; here we just use discover_data
-                # and split manually would be complex, so we'll use discover_data
-                # and take a separate portion. We'll just use the full discovered set
-                # as training and leave val empty, or we could use a second area.
-                # For this adaptation, we'll use discover_data for val as well,
-                # but in practice users should provide dict_train/dict_val.
-                self.val_dataset = FitDataset(
-                    dict_files=discover_data(self.data_dir),
-                    channels=self.channels,
-                    num_classes=self.num_classes,
-                    start_one=self.start_one,
-                    use_metadata=self.use_metadata,
-                    norm_type=self.norm_type,
-                    means=self.means,
-                    stds=self.stds,
-                )
+    def _resolve(self, split: str, provided: dict | None, arg_name: str) -> dict:
+        """Return the file dict for a split, deriving it when not provided.
 
+        Parameters
+        ----------
+        split : str
+            Split name, one of "train", "validation", "test".
+        provided : dict, optional
+            Explicit file dict for the split, or None to derive it.
+        arg_name : str
+            Constructor argument name, used in the error message.
+
+        Raises
+        ------
+        ValueError
+            If the split has no images, instead of silently falling back to
+            another split (a val set identical to train makes metrics useless).
+        """
+        files = provided if provided is not None else self._flair_splits()[split]
+        if not files.get("IMG"):
+            raise ValueError(
+                f"The '{split}' split has no images. Pass an explicit "
+                f"{arg_name} to FlairDatamodule, or make the matching FLAIR "
+                f"domain available under {self.data_dir!r}."
+            )
+        return files
+
+    def _make_fit_dataset(self, dict_files: dict, use_augmentations=None) -> FitDataset:
+        return FitDataset(
+            dict_files=dict_files,
+            channels=self.channels,
+            num_classes=self.num_classes,
+            start_one=self.start_one,
+            use_metadata=self.use_metadata,
+            use_augmentations=use_augmentations,
+            norm_type=self.norm_type,
+            means=self.means,
+            stds=self.stds,
+        )
+
+    def setup(self, stage: str | None = None) -> None:
+        if stage in (None, "fit"):
+            self.train_dataset = self._make_fit_dataset(
+                self._resolve("train", self.dict_train, "dict_train"),
+                use_augmentations=self.use_augmentations,
+            )
+            self.val_dataset = self._make_fit_dataset(
+                self._resolve("validation", self.dict_val, "dict_val"),
+            )
+        elif stage == "validate":
+            self.val_dataset = self._make_fit_dataset(
+                self._resolve("validation", self.dict_val, "dict_val"),
+            )
         elif stage == "predict":
-            if self.dict_test is not None:
-                self.pred_dataset = PredictDataset(
-                    dict_files=self.dict_test,
-                    channels=self.channels,
-                    num_classes=self.num_classes,
-                    use_metadata=self.use_metadata,
-                    norm_type=self.norm_type,
-                    means=self.means,
-                    stds=self.stds,
-                )
-            else:
-                # Auto-discover test/prediction data from data_dir
-                self.pred_dataset = PredictDataset(
-                    dict_files=discover_data(self.data_dir),
-                    channels=self.channels,
-                    num_classes=self.num_classes,
-                    use_metadata=self.use_metadata,
-                    norm_type=self.norm_type,
-                    means=self.means,
-                    stds=self.stds,
-                )
+            self.pred_dataset = PredictDataset(
+                dict_files=self._resolve("test", self.dict_test, "dict_test"),
+                channels=self.channels,
+                num_classes=self.num_classes,
+                use_metadata=self.use_metadata,
+                norm_type=self.norm_type,
+                means=self.means,
+                stds=self.stds,
+            )
 
     def train_dataloader(self):
         if self.train_dataset is None:
