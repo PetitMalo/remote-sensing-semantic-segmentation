@@ -20,3 +20,7 @@ venv/
 
 # --- Data ---
 /data/
+
+# --- Unit tests and coverage ---
+.coverage
+htmlcov
