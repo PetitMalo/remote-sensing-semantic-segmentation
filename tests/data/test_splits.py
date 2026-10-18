@@ -1,76 +1,92 @@
 """Unit tests for ``rsss.data.splits``.
 
-The official FLAIR#1 domain lists are part of the module's contract, so a few
-tests assert invariants over ``FLAIR_1_SPLIT`` itself; the rest run against a
-synthetic tree written to ``tmp_path`` via the shared ``write_tile`` fixture.
+The FLAIR dataset defines its split through the path CSVs it ships, so these
+tests cover CSV parsing, split classification and path resolution against
+synthetic trees written to ``tmp_path``. Both the toy and the full dataset's
+naming schemes are exercised, since the same code has to ingest either.
 """
 
 from __future__ import annotations
 
-import logging
 from pathlib import Path
 
 import pytest
 
-from rsss.data.splits import (
-    FLAIR_1_SPLIT,
-    build_flair_splits,
-    domain_of,
-    split_of_domain,
-)
+from rsss.data.splits import build_flair_splits, read_pairs_csv, split_of_csv
 
-# --------------------------------------------------------------------------- #
-# domain_of                                                                   #
-# --------------------------------------------------------------------------- #
-
-
-@pytest.mark.parametrize(
-    ("name", "expected"),
-    [
-        ("D004_2021", "D004"),
-        ("D006_2020", "D006"),
-        ("D012", "D012"),
-        ("D004_2021_extra", "D004"),
-    ],
-)
-def test_domain_of_returns_prefix_before_year(name, expected):
-    assert domain_of(name) == expected
+# (collection prefix, CSV stem) for the toy and the full dataset.
+NAMING = [
+    pytest.param("flair_1_toy", "flair-1-paths-toy", id="toy"),
+    pytest.param("flair", "flair-1-paths", id="full"),
+]
 
 
 # --------------------------------------------------------------------------- #
-# split_of_domain                                                             #
+# split_of_csv                                                                #
 # --------------------------------------------------------------------------- #
 
 
 @pytest.mark.parametrize(
-    ("domain", "expected"),
+    ("file_name", "expected"),
     [
-        (domain, split)
-        for split, domains in FLAIR_1_SPLIT.items()
-        for domain in sorted(domains)
+        ("flair-1-paths-train.csv", "train"),
+        ("flair-1-paths-toy-train.csv", "train"),
+        ("flair-1-paths-val.csv", "validation"),
+        ("flair-1-paths-toy-val.csv", "validation"),
+        ("flair-1-paths-test.csv", "test"),
+        ("flair-1-paths-toy-test.csv", "test"),
+        ("metadata.csv", None),
+        ("flair-1-paths-toy.csv", None),
     ],
 )
-def test_split_of_domain_maps_every_official_domain(domain, expected):
-    assert split_of_domain(domain) == expected
-
-
-def test_split_of_domain_returns_none_for_unknown_domain():
-    assert split_of_domain("D999") is None
+def test_split_of_csv_reads_the_trailing_token(file_name, expected):
+    assert split_of_csv(file_name) == expected
 
 
 # --------------------------------------------------------------------------- #
-# FLAIR_1_SPLIT invariants                                                    #
+# read_pairs_csv                                                              #
 # --------------------------------------------------------------------------- #
 
 
-def test_official_splits_use_the_expected_names():
-    assert set(FLAIR_1_SPLIT) == {"train", "validation", "test"}
+def test_read_pairs_csv_resolves_paths_relative_to_the_csv(tmp_path: Path):
+    csv_dir = tmp_path / "CSVs"
+    csv_dir.mkdir()
+    (csv_dir / "paths.csv").write_text(
+        "../aerial/D006_2020/Z1_UU/img/IMG_1.tif,"
+        "../labels/D006_2020/Z1_UU/msk/MSK_1.tif\n"
+    )
+
+    files = read_pairs_csv(csv_dir / "paths.csv")
+
+    assert files["IMG"] == [
+        str((tmp_path / "aerial/D006_2020/Z1_UU/img/IMG_1.tif").resolve())
+    ]
+    assert files["MSK"] == [
+        str((tmp_path / "labels/D006_2020/Z1_UU/msk/MSK_1.tif").resolve())
+    ]
 
 
-def test_official_splits_do_not_share_domains():
-    all_domains = [domain for domains in FLAIR_1_SPLIT.values() for domain in domains]
+def test_read_pairs_csv_skips_blank_lines(tmp_path: Path):
+    csv_dir = tmp_path / "CSVs"
+    csv_dir.mkdir()
+    (csv_dir / "paths.csv").write_text(
+        "../a/img/IMG_1.tif,../b/msk/MSK_1.tif\n"
+        "\n"
+        "../a/img/IMG_2.tif,../b/msk/MSK_2.tif\n"
+    )
 
-    assert len(all_domains) == len(set(all_domains))
+    files = read_pairs_csv(csv_dir / "paths.csv")
+
+    assert len(files["IMG"]) == len(files["MSK"]) == 2
+
+
+def test_read_pairs_csv_rejects_rows_without_two_fields(tmp_path: Path):
+    csv_dir = tmp_path / "CSVs"
+    csv_dir.mkdir()
+    (csv_dir / "paths.csv").write_text("../a/img/IMG_1.tif\n")
+
+    with pytest.raises(ValueError, match="expected 'IMG,MSK' rows"):
+        read_pairs_csv(csv_dir / "paths.csv")
 
 
 # --------------------------------------------------------------------------- #
@@ -78,72 +94,83 @@ def test_official_splits_do_not_share_domains():
 # --------------------------------------------------------------------------- #
 
 
-def _areas_of(paths: list[str]) -> list[str]:
-    """Return the area directory (4th path component from the end) of each path."""
-    return [Path(path).parts[-4] for path in paths]
+@pytest.mark.parametrize(("collection", "csv_stem"), NAMING)
+def test_build_flair_splits_reads_the_three_splits(
+    tmp_path, write_flair_dataset, collection, csv_stem
+):
+    root = write_flair_dataset(
+        tmp_path / "dataset", collection=collection, csv_stem=csv_stem
+    )
 
+    splits = build_flair_splits(root)
 
-def test_build_flair_splits_buckets_areas_by_official_split(tmp_path, write_tile):
-    root = tmp_path / "data"
-    write_tile(root, "D006_2020", "Z1", ["000001"], ["000001"])  # train
-    write_tile(root, "D004_2021", "Z1", ["000001"], ["000001"])  # validation
-    write_tile(root, "D012_2019", "Z1", ["000001"], ["000001"])  # test
-
-    splits = build_flair_splits(str(root))
-
-    assert _areas_of(splits["train"]["IMG"]) == ["D006_2020"]
-    assert _areas_of(splits["validation"]["IMG"]) == ["D004_2021"]
-    assert _areas_of(splits["test"]["IMG"]) == ["D012_2019"]
+    assert set(splits) == {"train", "validation", "test"}
     for contents in splits.values():
-        assert _areas_of(contents["IMG"]) == _areas_of(contents["MSK"])
+        assert len(contents["IMG"]) == len(contents["MSK"]) == 1
+    assert f"{collection}_aerial_train" in splits["train"]["IMG"][0]
 
 
-def test_build_flair_splits_keeps_img_and_msk_aligned(tmp_path, write_tile):
-    root = tmp_path / "data"
-    write_tile(root, "D006_2020", "Z1", ["000002", "000001"], ["000001", "000002"])
-
-    train = build_flair_splits(str(root))["train"]
-
-    assert len(train["IMG"]) == 2
-    for img, msk in zip(train["IMG"], train["MSK"], strict=True):
-        assert Path(img).name[len("IMG_") :] == Path(msk).name[len("MSK_") :]
-
-
-def test_build_flair_splits_returns_empty_lists_when_no_data(tmp_path):
-    root = tmp_path / "data"
-    root.mkdir()
-
-    splits = build_flair_splits(str(root))
-
-    assert splits == {
-        "train": {"IMG": [], "MSK": []},
-        "validation": {"IMG": [], "MSK": []},
-        "test": {"IMG": [], "MSK": []},
-    }
-
-
-def test_build_flair_splits_drops_unknown_domain_with_warning(
-    tmp_path, write_tile, caplog
+def test_build_flair_splits_maps_val_to_validation_outside_train(
+    tmp_path, write_flair_dataset
 ):
-    root = tmp_path / "data"
-    write_tile(root, "D999_2020", "Z1", ["000001"], ["000001"])
+    root = write_flair_dataset(tmp_path / "dataset")
 
-    with caplog.at_level(logging.WARNING):
-        splits = build_flair_splits(str(root))
+    splits = build_flair_splits(root)
 
-    assert all(not contents["IMG"] for contents in splits.values())
-    assert "D999_2020" in caplog.text
-    assert "not part of the official FLAIR#1 split" in caplog.text
+    # Both live under the train collection directory, so only the CSVs separate
+    # them: the validation tile must not leak into train.
+    assert splits["train"]["IMG"] == [
+        str(
+            (
+                root / "flair_1_toy_aerial_train/D006_2020/Z1_UU/img/IMG_000001.tif"
+            ).resolve()
+        )
+    ]
+    assert splits["validation"]["IMG"] == [
+        str(
+            (
+                root / "flair_1_toy_aerial_train/D004_2021/Z9_UN/img/IMG_000734.tif"
+            ).resolve()
+        )
+    ]
+    assert splits["test"]["IMG"] == [
+        str(
+            (
+                root / "flair_1_toy_aerial_test/D012_2019/Z3_UU/img/IMG_061946.tif"
+            ).resolve()
+        )
+    ]
 
 
-def test_build_flair_splits_warns_when_a_split_has_no_local_data(
-    tmp_path, write_tile, caplog
+def test_build_flair_splits_ignores_csvs_without_a_split_token(
+    tmp_path, write_flair_dataset
 ):
-    root = tmp_path / "data"
-    write_tile(root, "D006_2020", "Z1", ["000001"], ["000001"])
+    root = write_flair_dataset(tmp_path / "dataset")
+    (root / "CSVs" / "metadata.csv").write_text("a,b\n")
 
-    with caplog.at_level(logging.WARNING):
-        build_flair_splits(str(root))
+    splits = build_flair_splits(root)
 
-    assert "No local data found for the 'validation' split." in caplog.text
-    assert "No local data found for the 'test' split." in caplog.text
+    assert set(splits) == {"train", "validation", "test"}
+
+
+def test_build_flair_splits_raises_without_csv_directory(tmp_path: Path):
+    with pytest.raises(FileNotFoundError, match="'CSVs' directory"):
+        build_flair_splits(tmp_path / "dataset")
+
+
+def test_build_flair_splits_raises_when_a_split_is_missing(tmp_path, write_flair_split):
+    root = tmp_path / "dataset"
+    write_flair_split(root, "train", [("D006_2020", "Z1_UU", "000001")])
+
+    with pytest.raises(FileNotFoundError, match="validation"):
+        build_flair_splits(root)
+
+
+def test_build_flair_splits_rejects_two_csvs_for_one_split(
+    tmp_path, write_flair_dataset
+):
+    root = write_flair_dataset(tmp_path / "dataset")
+    (root / "CSVs" / "flair-1-paths-toy-alt-train.csv").write_text("")
+
+    with pytest.raises(ValueError, match="Two CSVs describe the 'train' split"):
+        build_flair_splits(root)

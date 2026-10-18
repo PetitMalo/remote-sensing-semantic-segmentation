@@ -15,7 +15,7 @@ class FlairDatamodule(LightningDataModule):
     """Lightning data module for the FLAIR aerial/label pairs.
 
     When ``dict_train``, ``dict_val`` or ``dict_test`` is omitted, the matching
-    split is derived from the official FLAIR#1 domain split via
+    split is read from the dataset's path CSVs (``<data_dir>/CSVs``) via
     :func:`rsss.data.splits.build_flair_splits`. A split that ends up empty
     raises, rather than silently reusing another split's data.
     """
@@ -59,15 +59,15 @@ class FlairDatamodule(LightningDataModule):
         self.norm_type = norm_type
         self.means = means
         self.stds = stds
-        # Official FLAIR#1 split, built lazily from data_dir and reused across
-        # stages so a single discovery pass serves every omitted dict.
+        # FLAIR split, read lazily from ``<data_dir>/CSVs`` and reused across
+        # stages so the CSVs are parsed once.
         self._splits: dict[str, dict[str, list[str]]] | None = None
 
     def prepare_data(self) -> None:
         pass
 
     def _flair_splits(self) -> dict[str, dict[str, list[str]]]:
-        """Return the official FLAIR#1 split, discovering it once."""
+        """Return the FLAIR#1 split, reading the CSVs once."""
         if self._splits is None:
             self._splits = build_flair_splits(self.data_dir)
         return self._splits
@@ -94,8 +94,8 @@ class FlairDatamodule(LightningDataModule):
         if not files.get("IMG"):
             raise ValueError(
                 f"The '{split}' split has no images. Pass an explicit "
-                f"{arg_name} to FlairDatamodule, or make the matching FLAIR "
-                f"domain available under {self.data_dir!r}."
+                f"{arg_name} to FlairDatamodule, or point data_dir "
+                f"({self.data_dir!r}) at an extracted FLAIR#1 dataset."
             )
         return files
 
