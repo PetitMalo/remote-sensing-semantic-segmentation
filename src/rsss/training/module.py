@@ -39,6 +39,21 @@ METRIC_STAGES = ("val", "test")
 METRIC_NAMES = ("iou", "f1", "support")
 
 
+def _to_class_indices(msk: Tensor) -> Tensor:
+    """Collapse a mask to the class indices the losses and metrics expect.
+
+    ``FitDataset`` one-hot encodes the labels, like the official FLAIR baseline,
+    so a mask arrives shaped ``(batch, classes, height, width)``; the loss and
+    the metrics want ``(batch, height, width)``. Mask pixels outside the encoded
+    range are all-false and collapse to class 0, as flagged in
+    ``explore_flair_data.ipynb``. A mask already shaped as indices is returned
+    unchanged, only cast to the integer dtype ``bincount`` needs.
+    """
+    if msk.dim() == 4:
+        return msk.argmax(dim=1)
+    return msk.long()
+
+
 def _format_per_class(values: Mapping[str, float], metric: str) -> str:
     """Render the per-class metrics of one split as a compact line.
 
@@ -80,8 +95,10 @@ class SegmentationModule(LightningModule):
 
     Notes
     -----
-    Masks are expected as class indices of shape ``(batch, height, width)``,
-    as produced by the fit datasets.
+    Masks are expected one-hot encoded, shaped ``(batch, classes, height,
+    width)``, as produced by the fit datasets; they are collapsed to class
+    indices before the loss and the metrics. Index masks shaped ``(batch,
+    height, width)`` are accepted too.
     """
 
     def __init__(
@@ -173,7 +190,7 @@ class SegmentationModule(LightningModule):
     def _shared_step(self, batch: Mapping[str, Tensor], stage: str) -> Tensor:
         """Score one batch, accumulating metrics for the splits that report them."""
         logits = self(batch["img"])
-        target = batch["msk"].long()
+        target = _to_class_indices(batch["msk"])
         loss = self._compute_loss(logits, target)
         if stage in METRIC_STAGES:
             self._update_metrics(stage, logits, target)

@@ -29,7 +29,11 @@ from torch.optim.lr_scheduler import (
 )
 from torch.utils.data import DataLoader, Dataset
 
-from rsss.training.module import SegmentationModule, _format_per_class
+from rsss.training.module import (
+    SegmentationModule,
+    _format_per_class,
+    _to_class_indices,
+)
 
 NUM_CLASSES = 3
 IN_CHANNELS = 3
@@ -51,14 +55,29 @@ def make_module(**overrides: Any) -> SegmentationModule:
     return SegmentationModule(**kwargs)
 
 
+def one_hot(msk: Tensor) -> Tensor:
+    """Encode index masks the way the fit datasets do: one-hot, channels first."""
+    return (
+        torch.nn.functional.one_hot(msk.long(), NUM_CLASSES).permute(0, 3, 1, 2).float()
+    )
+
+
 @pytest.fixture
-def batch() -> dict[str, Tensor]:
-    """A two-sample batch shaped like the fit datasets' output."""
+def target() -> Tensor:
+    """A two-sample batch of class-index masks."""
     torch.manual_seed(0)
-    return {
-        "img": torch.randn(2, IN_CHANNELS, SIZE, SIZE),
-        "msk": torch.randint(0, NUM_CLASSES, (2, SIZE, SIZE)),
-    }
+    return torch.randint(0, NUM_CLASSES, (2, SIZE, SIZE))
+
+
+@pytest.fixture
+def batch(target: Tensor) -> dict[str, Tensor]:
+    """A two-sample batch shaped like the fit datasets' output.
+
+    ``msk`` is one-hot, exactly as ``FitDataset`` emits it; ``target`` holds the
+    same labels as indices, for the loss arithmetic the module performs.
+    """
+    torch.manual_seed(0)
+    return {"img": torch.randn(2, IN_CHANNELS, SIZE, SIZE), "msk": one_hot(target)}
 
 
 class _SyntheticSegData(Dataset):
@@ -67,7 +86,7 @@ class _SyntheticSegData(Dataset):
     def __init__(self, size: int = 2) -> None:
         torch.manual_seed(0)
         self.img = torch.randn(size, IN_CHANNELS, SIZE, SIZE)
-        self.msk = torch.randint(0, NUM_CLASSES, (size, SIZE, SIZE))
+        self.msk = one_hot(torch.randint(0, NUM_CLASSES, (size, SIZE, SIZE)))
 
     def __len__(self) -> int:
         return self.img.shape[0]
@@ -111,44 +130,63 @@ def test_class_weights_must_match_the_class_count():
 
 
 # --------------------------------------------------------------------------- #
+# Mask encoding                                                               #
+# --------------------------------------------------------------------------- #
+
+
+def test_one_hot_masks_collapse_to_their_indices(target):
+    assert torch.equal(_to_class_indices(one_hot(target)), target)
+
+
+def test_index_masks_are_returned_as_integers(target):
+    indices = _to_class_indices(target)
+
+    assert torch.equal(indices, target)
+    assert indices.dtype == torch.long
+
+
+# --------------------------------------------------------------------------- #
 # Loss                                                                        #
 # --------------------------------------------------------------------------- #
 
 
-def test_cross_entropy_only_matches_torch(batch):
+def test_cross_entropy_only_matches_torch(batch, target):
     module = make_module(loss={"ce": 1.0, "dice": 0.0})
     logits = module(batch["img"])
-    expected = F.cross_entropy(logits, batch["msk"])
-    assert torch.allclose(module._compute_loss(logits, batch["msk"]), expected)
+    expected = F.cross_entropy(logits, target)
+    assert torch.allclose(module._compute_loss(logits, target), expected)
 
 
-def test_dice_only_matches_segmentation_models_pytorch(batch):
+def test_dice_only_matches_segmentation_models_pytorch(batch, target):
     module = make_module(loss={"ce": 0.0, "dice": 1.0})
     logits = module(batch["img"])
-    expected = smp.losses.DiceLoss(mode="multiclass", ignore_index=None)(
-        logits, batch["msk"]
-    )
-    assert torch.allclose(module._compute_loss(logits, batch["msk"]), expected)
+    expected = smp.losses.DiceLoss(mode="multiclass", ignore_index=None)(logits, target)
+    assert torch.allclose(module._compute_loss(logits, target), expected)
 
 
-def test_loss_terms_are_weighted(batch):
+def test_loss_terms_are_weighted(batch, target):
     module = make_module(loss={"ce": 0.25, "dice": 0.75})
     logits = module(batch["img"])
-    ce = F.cross_entropy(logits, batch["msk"])
-    dice = smp.losses.DiceLoss(mode="multiclass", ignore_index=None)(
-        logits, batch["msk"]
-    )
+    ce = F.cross_entropy(logits, target)
+    dice = smp.losses.DiceLoss(mode="multiclass", ignore_index=None)(logits, target)
     expected = 0.25 * ce + 0.75 * dice
-    assert torch.allclose(module._compute_loss(logits, batch["msk"]), expected)
+    assert torch.allclose(module._compute_loss(logits, target), expected)
 
 
-def test_class_weights_reach_the_cross_entropy_term(batch):
+def test_class_weights_reach_the_cross_entropy_term(batch, target):
     module = make_module(loss={"ce": 1.0, "dice": 0.0}, class_weights=[1.0, 2.0, 3.0])
     logits = module(batch["img"])
-    expected = F.cross_entropy(
-        logits, batch["msk"], weight=torch.tensor([1.0, 2.0, 3.0])
-    )
-    assert torch.allclose(module._compute_loss(logits, batch["msk"]), expected)
+    expected = F.cross_entropy(logits, target, weight=torch.tensor([1.0, 2.0, 3.0]))
+    assert torch.allclose(module._compute_loss(logits, target), expected)
+
+
+def test_shared_step_reads_the_datasets_one_hot_mask(batch, target):
+    module = make_module()
+
+    from_one_hot = module._shared_step(batch, "train")
+    from_indices = module._shared_step({**batch, "msk": target}, "train")
+
+    assert torch.allclose(from_one_hot, from_indices)
 
 
 # --------------------------------------------------------------------------- #
@@ -163,12 +201,12 @@ def test_metrics_are_registered_per_stage():
         assert module._metric("val", name) is not None
 
 
-def test_epoch_metrics_leave_absent_classes_out_of_the_mean(batch):
+def test_epoch_metrics_leave_absent_classes_out_of_the_mean(batch, target):
     module = make_module()
     # Only two classes are present, so the third one is undefined, not zero.
-    target = batch["msk"].clone()
-    target[target == 2] = 0
-    module._update_metrics("val", module(batch["img"]), target)
+    only_two = target.clone()
+    only_two[only_two == 2] = 0
+    module._update_metrics("val", module(batch["img"]), only_two)
 
     values = module._epoch_metrics("val")
 
@@ -178,9 +216,9 @@ def test_epoch_metrics_leave_absent_classes_out_of_the_mean(batch):
     assert values["val/mIoU"] == pytest.approx(sum(defined) / 2)
 
 
-def test_epoch_metrics_cover_every_class_and_both_metrics(batch):
+def test_epoch_metrics_cover_every_class_and_both_metrics(batch, target):
     module = make_module()
-    module._update_metrics("test", module(batch["img"]), batch["msk"])
+    module._update_metrics("test", module(batch["img"]), target)
 
     values = module._epoch_metrics("test")
 
