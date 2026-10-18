@@ -100,3 +100,9 @@ cannot be made to work at all, copy the archive in by other means:
 `ensure_dataset` accepts a complete `$DATA_DIR/flair_1_toy_dataset.zip`
 (226 168 911 bytes), checks its size, and verifies the tiles it extracts, so
 the result is the same as a direct fetch.
+
+To run an interactive session:
+
+```bash
+srun --pty --partition=gpu --gres=gpu:1 --cpus-per-task=4 --mem=16G --time=01:00:00 /bin/bash
+```
