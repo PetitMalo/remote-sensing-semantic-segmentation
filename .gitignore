@@ -21,6 +21,16 @@ venv/
 # --- Data ---
 /data/
 
+# --- Run artefacts ---
+# Slurm logs (logs/ ships a .gitkeep so the batch script can write there),
+# training logs and checkpoints, and the Lightning run directories.
+/logs/*
+!/logs/.gitkeep
+/outputs/
+/checkpoints/
+slurm-*.out
+slurm-*.err
+
 # --- Unit tests and coverage ---
 .coverage
 htmlcov

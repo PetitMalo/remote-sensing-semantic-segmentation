@@ -10,7 +10,9 @@ Current scope: land cover (couverture) only, one small area first.
 ## Stack
 - Python, managed with uv (never use pip directly)
 - Lint/format: ruff. Types: ty. Tests: pytest. Hooks: pre-commit
-- Training/eval on Google Cloud Platform (GCS for data, GPU VM for runs)
+- Training/eval: GPU jobs on ISAE-SUPAERO's PANDO cluster via Slurm (now);
+  Google Cloud Platform (GCS for data, GPU VM for runs) later, once the PANDO
+  runs have proved the pipeline
 - TODO: DINO version (DINOv2 or DINOv3), to decide before the model code
 
 ## Commands
@@ -20,6 +22,19 @@ Current scope: land cover (couverture) only, one small area first.
 - Tests: `uv run pytest -q`
 - All checks: `uv run pre-commit run --all-files`
 Run lint, types and tests before declaring any task done.
+
+## Compute
+Development happens locally, training does not. PANDO (ISAE-SUPAERO) is the GPU
+target now; GCP comes later, once these runs have proved the pipeline.
+1. Log in to PANDO, clone the repo, and prepare the node from the login node
+   (compute nodes have no internet): `uv sync --frozen`, then stage the dataset
+   with `uv run python -m rsss.data.download --data-dir <root>`.
+2. Submit a run from the repository root: `sbatch scripts/pando/job.sh`. It
+   takes the dataset root, run directory and epoch count from `DATA_DIR`,
+   `RUN_DIR` and `EPOCHS`, and writes logs and checkpoints outside the repo.
+3. Read the results in `logs/slurm-<jobid>.out` and the run directory.
+See the `pando-gpu` skill for the batch-script conventions. Never launch jobs
+yourself: give me the `sbatch` (or `gcloud`) command instead.
 
 ## Code conventions
 - Small, pure, single-purpose functions; no hidden global state
@@ -44,7 +59,7 @@ Run lint, types and tests before declaring any task done.
 
 ## Boundaries (never do)
 - Never commit data, model weights, credentials or `.env` files
-- Never launch GCP jobs or create cloud resources; give me the command instead
+- Never launch GCP or PANDO jobs or create cloud resources; give me the command instead
 - Never download full datasets; use small samples for tests and smoke runs
 - Never fabricate metrics or results; report only what was actually run
 
