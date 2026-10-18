@@ -13,22 +13,36 @@ Current scope: land cover (couverture) only, one small area first.
 - Training/eval: GPU jobs on ISAE-SUPAERO's PANDO cluster via Slurm (now);
   Google Cloud Platform (GCS for data, GPU VM for runs) later, once the PANDO
   runs have proved the pipeline
+- Two runtime stacks in `uv.lock`, selected by dependency group: `gcp` (a
+  default, latest releases) and `pando` (RHEL 7.8 / glibc 2.17, CUDA 12.4
+  driver, V100 GPUs). A package whose version differs between the two targets
+  goes in both groups, never in `[project.dependencies]`, which applies to
+  every fork. `tests/test_lock_platform.py` guards the PANDO side
 - TODO: DINO version (DINOv2 or DINOv3), to decide before the model code
 
 ## Commands
 - Install: `uv sync`
+- Per-target install: `uv sync --frozen --no-default-groups --no-dev --group pando` (PANDO);
+  local and GCP use the default `gcp` group
 - Lint: `uv run ruff check . --fix` / Format: `uv run ruff format .`
 - Types: `uv run ty check`
-- Tests: `uv run pytest -q`
+- Tests: `uv run pytest -q` (the `pando` stack too when dependencies change:
+  `UV_PROJECT_ENVIRONMENT=.venv-pando uv run --no-default-groups --group dev
+  --group pando pytest -q`, in an environment of its own, since the two stacks
+  install different `nvidia-*` wheels into the same directories and switching
+  the main one can delete files uv does not know it owns)
 - All checks: `uv run pre-commit run --all-files`
 Run lint, types and tests before declaring any task done.
 
 ## Compute
 Development happens locally, training does not. PANDO (ISAE-SUPAERO) is the GPU
 target now; GCP comes later, once these runs have proved the pipeline.
-1. Log in to PANDO, clone the repo, and prepare the node from the login node
-   (compute nodes have no internet): `uv sync --frozen`, then stage the dataset
-   with `uv run python -m rsss.data.download --data-dir <root>`.
+1. Log in to PANDO, clone the repo, and prepare the environment from the login
+   node (compute nodes have no internet). Every command there selects the
+   `pando` group, since the default stack needs glibc 2.28:
+   `uv sync --frozen --no-default-groups --no-dev --group pando`, then stage the
+   dataset with
+   `uv run --no-default-groups --group pando python -m rsss.data.download --data-dir <root>`.
 2. Submit a run from the repository root: `sbatch scripts/pando/job.sh`. It
    takes the dataset root, run directory and epoch count from `DATA_DIR`,
    `RUN_DIR` and `EPOCHS`, and writes logs and checkpoints outside the repo.

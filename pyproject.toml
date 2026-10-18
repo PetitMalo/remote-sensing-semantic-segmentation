@@ -7,15 +7,14 @@ authors = [
     { name = "Maël Dacher", email = "mael.dacher.90@gmail.com" }
 ]
 requires-python = ">=3.12"
+# Only the dependencies shared by every target belong here. The ones that differ
+# between the cluster and the cloud live in the `pando` and `gcp` groups below,
+# because uv can fork the resolution per group but never for a project dependency.
 dependencies = [
     "loguru>=0.7.3",
-    "numpy>=2.5.4",
     "pytorch-lightning>=2.6.6",
     "pyyaml>=6.0.3",
-    "rasterio>=1.5.2",
-    "scikit-image>=0.26.0",
     "segmentation-models-pytorch>=0.5.0",
-    "torch>=2.14.1",
     "torchmetrics>=1.9.0",
 ]
 
@@ -26,10 +25,46 @@ build-backend = "uv_build"
 [tool.uv.build-backend]
 module-name = "rsss"
 
+[tool.uv]
+# The two runtime stacks below are mutually exclusive, so uv resolves them in
+# separate forks of one lockfile. Everything else defaults to the local/cloud
+# stack; PANDO selects its own with
+#   uv sync --frozen --no-default-groups --no-dev --group pando
+default-groups = ["dev", "gcp"]
+conflicts = [
+    [{ group = "pando" }, { group = "gcp" }],
+]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
 [dependency-groups]
+# PANDO: RHEL 7.8, glibc 2.17 (manylinux2014 wheels and older only), driver
+# 550.54.15 (CUDA 12.4 at most) and Tesla V100 GPUs (sm_70, no bf16).
+# torch 2.6.0 is the newest release that satisfies all three at once: the last
+# one shipping a manylinux1 x86_64 wheel, built for CUDA 12.4, before CUDA 12.8
+# dropped Volta. scipy, pillow and rasterio are bounded although nothing depends
+# on them directly: their newer releases need glibc 2.27 (scipy 1.17, pillow
+# 12.3) or 2.28 (rasterio 1.4.4).
+pando = [
+    "numpy>=2.2.6,<2.3",
+    "pillow>=11.1,<12.3",
+    "rasterio>=1.4.3,<1.4.4",
+    "scikit-image>=0.25.2,<0.26",
+    "scipy>=1.15,<1.17",
+    "torch>=2.6,<2.7",
+    "torchvision>=0.21,<0.22",
+]
+# GCP: a modern GPU VM image, so track the latest releases. Keep the two groups
+# disjoint -- tests/test_lock_platform.py resolves both forks and fails if the
+# torch or numpy picks converge.
+gcp = [
+    "numpy>=2.5.4",
+    "rasterio>=1.5.2",
+    "scikit-image>=0.26.0",
+    "torch>=2.14.1",
+    "torchvision>=0.29.1",
+]
 dev = [
     "ipykernel>=7.4.0",
     "matplotlib>=3.11.2",
