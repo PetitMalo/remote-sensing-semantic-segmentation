@@ -47,6 +47,7 @@ def test_parser_defaults_to_the_shipped_configs():
     assert args.max_epochs is None
     assert args.limit_train_batches is None
     assert args.fast_dev_run is False
+    assert args.skip_test is False
     assert args.seed is None
 
 
@@ -66,6 +67,7 @@ def test_parser_reads_every_override():
             "--limit-train-batches",
             "5",
             "--fast-dev-run",
+            "--skip-test",
             "--seed",
             "7",
         ]
@@ -78,6 +80,7 @@ def test_parser_reads_every_override():
     assert args.max_epochs == 2
     assert args.limit_train_batches == 5
     assert args.fast_dev_run is True
+    assert args.skip_test is True
     assert args.seed == 7
 
 
@@ -204,12 +207,32 @@ def smoke_argv(tmp_path, write_flair_dataset) -> list[str]:
 @pytest.mark.filterwarnings("ignore:.*does not have many workers")
 @pytest.mark.filterwarnings("ignore:.*compute.*called before the.*update")
 def test_run_fits_and_writes_its_artefacts(smoke_argv, tmp_path):
+    run(parse(smoke_argv))
+
+    # ``callback_metrics`` holds only the test pass once the fit is over, so the
+    # train/val metrics are asserted through the CSVLogger artefacts instead.
+    assert list((tmp_path / "outputs" / "checkpoints").glob("*.ckpt"))
+    csv_files = list((tmp_path / "outputs" / "csv").rglob("metrics.csv"))
+    assert csv_files
+    logged = "\n".join(path.read_text() for path in csv_files)
+    assert "train/loss" in logged
+    assert "val/mIoU" in logged
+
+
+@pytest.mark.filterwarnings("ignore:.*does not have many workers")
+@pytest.mark.filterwarnings("ignore:.*compute.*called before the.*update")
+def test_run_scores_the_test_split_after_the_fit(smoke_argv):
     trainer = run(parse(smoke_argv))
 
-    assert "train/loss" in trainer.callback_metrics
-    assert "val/mIoU" in trainer.callback_metrics
-    assert list((tmp_path / "outputs" / "checkpoints").glob("*.ckpt"))
-    assert list((tmp_path / "outputs" / "csv").rglob("metrics.csv"))
+    assert "test/mIoU" in trainer.callback_metrics
+
+
+@pytest.mark.filterwarnings("ignore:.*does not have many workers")
+@pytest.mark.filterwarnings("ignore:.*compute.*called before the.*update")
+def test_skip_test_leaves_the_test_split_unscored(smoke_argv):
+    trainer = run(parse([*smoke_argv, "--skip-test"]))
+
+    assert "test/mIoU" not in trainer.callback_metrics
 
 
 @pytest.mark.filterwarnings("ignore:.*does not have many workers")

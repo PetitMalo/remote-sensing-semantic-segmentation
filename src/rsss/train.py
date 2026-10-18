@@ -4,7 +4,9 @@ Run it with ``uv run python -m rsss.train`` (``-h`` for the options). The
 architecture, the recipe and the data source come from ``configs/train.yaml``
 and ``configs/data.yaml``; the flags only override what has to change per run:
 the dataset location and the output directory on a cluster, or a quick smoke
-fit. Example: ``uv run python -m rsss.train --fast-dev-run --output-dir
+fit. A fit is followed by an evaluation on the test split, whose per-class IoU
+is reported alongside the validation metrics; ``--skip-test`` turns that off.
+Example: ``uv run python -m rsss.train --fast-dev-run --output-dir
 /scratch/me/runs/smoke``.
 """
 
@@ -72,6 +74,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Run one training and one validation batch, then stop.",
     )
     parser.add_argument(
+        "--skip-test",
+        action="store_true",
+        help="Skip the test-split evaluation that follows a fit.",
+    )
+    parser.add_argument(
         "--seed",
         type=int,
         default=None,
@@ -131,10 +138,12 @@ def build_trainer(config: TrainConfig, args: argparse.Namespace) -> pl.Trainer:
 
 
 def run(args: argparse.Namespace) -> pl.Trainer:
-    """Fit the configured model and return the Trainer that ran it.
+    """Fit the configured model, evaluate it, and return the Trainer that ran it.
 
-    Returning the Trainer keeps the run inspectable from a caller (and from the
-    tests), instead of hiding the run behind the exit code.
+    The test split is scored right after the fit, on the weights the last epoch
+    left, unless ``--skip-test`` is given. Returning the Trainer keeps the run
+    inspectable from a caller (and from the tests), instead of hiding the run
+    behind the exit code.
     """
     config = load_train_config(args.config)
     datamodule = build_datamodule(config, args)
@@ -147,6 +156,8 @@ def run(args: argparse.Namespace) -> pl.Trainer:
         args.output_dir,
     )
     trainer.fit(module, datamodule=datamodule)
+    if not args.skip_test:
+        trainer.test(module, datamodule=datamodule)
     return trainer
 
 
