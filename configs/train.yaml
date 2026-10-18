@@ -1,0 +1,40 @@
+# Training recipe for the shared segmentation module.
+#
+# model       : forwarded to rsss.models.build_model ("name" plus its kwargs).
+# num_classes : classes shared by the model head and the metrics (FLAIR = 13).
+# loss        : weights of the cross-entropy and Dice terms.
+# optimizer   : AdamW settings.
+# scheduler   : warmup-then-cosine; `t_max` defaults to `trainer.max_epochs`.
+# trainer     : Lightning Trainer settings.
+# datamodule  : FlairDatamodule settings; the data source itself lives in
+#               configs/data.yaml (data_dir here would be rejected).
+model:
+  name: unet
+  encoder_name: resnet34
+  encoder_weights: imagenet
+  in_channels: 5
+
+num_classes: 13
+
+loss:
+  ce: 0.5
+  dice: 0.5
+
+optimizer:
+  lr: 3.0e-4
+  weight_decay: 1.0e-4
+
+scheduler:
+  warmup_epochs: 1
+
+trainer:
+  max_epochs: 30
+  accelerator: auto
+  devices: 1
+  precision: 16-mixed
+  log_every_n_steps: 10
+
+datamodule:
+  batch_size: 2
+  num_workers: 4
+  norm_type: scaling
