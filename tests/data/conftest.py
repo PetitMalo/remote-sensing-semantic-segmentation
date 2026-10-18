@@ -7,12 +7,19 @@ can build exactly the tree it needs.
 
 from __future__ import annotations
 
+import csv
 from pathlib import Path
 
 import numpy as np
 import pytest
 import rasterio
 from rasterio.transform import from_origin
+
+# FLAIR ships its split as path CSVs whose last "-"-separated token names the
+# split; "val" is the toy's and the full dataset's spelling for validation.
+_CSV_SUFFIXES = {"train": "train", "validation": "val", "test": "test"}
+# Validation tiles live in the train collection, for both datasets.
+_COLLECTION_ROOTS = {"train": "train", "validation": "train", "test": "test"}
 
 
 @pytest.fixture
@@ -62,22 +69,67 @@ def write_msk(write_tif):
 
 
 @pytest.fixture
-def write_tile(write_img, write_msk):
-    """Return a writer populating one ``<area>/{aerial,labels}/<tile>/`` tree."""
+def write_flair_split(write_img, write_msk):
+    """Return a writer for one split of a synthetic FLAIR#1 dataset.
 
-    def _write_tile(
+    It reproduces the real layout: one CSV per split under ``<root>/CSVs``, and
+    the validation tiles inside the train collection directory. ``collection``
+    and ``csv_stem`` select the naming scheme, so both the toy
+    (``flair_1_toy`` / ``flair-1-paths-toy``) and the full dataset
+    (``flair`` / ``flair-1-paths``) can be built.
+    """
+
+    def _write_flair_split(
         root: Path,
-        area: str,
-        tile: str,
-        img_ids: list[str],
-        msk_ids: list[str],
-    ) -> None:
-        for img_id in img_ids:
-            write_img(root / area / "aerial" / tile / f"IMG_{img_id}.tif")
-        for msk_id in msk_ids:
-            write_msk(
-                root / area / "labels" / tile / f"MSK_{msk_id}.tif",
-                np.full((4, 4), 1),
+        split: str,
+        tiles: list[tuple[str, str, str]],
+        collection: str = "flair_1_toy",
+        csv_stem: str = "flair-1-paths-toy",
+    ) -> Path:
+        """Write the split's CSV and IMG/MSK files; ``tiles`` are (area, zone, stem)."""
+        collection_root = _COLLECTION_ROOTS[split]
+        rows: list[tuple[str, str]] = []
+        for area, zone, stem in tiles:
+            img_rel = (
+                f"../{collection}_aerial_{collection_root}/"
+                f"{area}/{zone}/img/IMG_{stem}.tif"
             )
+            msk_rel = (
+                f"../{collection}_labels_{collection_root}/"
+                f"{area}/{zone}/msk/MSK_{stem}.tif"
+            )
+            write_img((root / "CSVs" / img_rel).resolve())
+            write_msk((root / "CSVs" / msk_rel).resolve(), np.full((4, 4), 1))
+            rows.append((img_rel, msk_rel))
 
-    return _write_tile
+        csv_path = root / "CSVs" / f"{csv_stem}-{_CSV_SUFFIXES[split]}.csv"
+        csv_path.parent.mkdir(parents=True, exist_ok=True)
+        with csv_path.open("w", newline="") as handle:
+            csv.writer(handle).writerows(rows)
+        return csv_path
+
+    return _write_flair_split
+
+
+@pytest.fixture
+def write_flair_dataset(write_flair_split):
+    """Return a writer for a complete three-split synthetic FLAIR#1 dataset."""
+
+    def _write_flair_dataset(
+        root: Path,
+        collection: str = "flair_1_toy",
+        csv_stem: str = "flair-1-paths-toy",
+    ) -> Path:
+        """Write one tile per split and return ``root``."""
+        tiles = {
+            "train": [("D006_2020", "Z1_UU", "000001")],
+            "validation": [("D004_2021", "Z9_UN", "000734")],
+            "test": [("D012_2019", "Z3_UU", "061946")],
+        }
+        for split, split_tiles in tiles.items():
+            write_flair_split(
+                root, split, split_tiles, collection=collection, csv_stem=csv_stem
+            )
+        return root
+
+    return _write_flair_dataset

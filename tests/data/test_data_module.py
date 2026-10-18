@@ -1,8 +1,8 @@
 """Unit tests for ``rsss.data.data_module``.
 
 Most tests stub ``build_flair_splits`` so ``FlairDatamodule`` is exercised
-without any file discovery; one end-to-end test runs against a synthetic tree
-written to ``tmp_path`` via the shared ``write_tile`` fixture.
+without any file reads; one end-to-end test runs against a synthetic dataset tree
+written to ``tmp_path`` via the shared ``write_flair_dataset`` fixture.
 """
 
 from __future__ import annotations
@@ -42,13 +42,9 @@ def discovery_calls(monkeypatch, fake_splits) -> list[str]:
 
 
 @pytest.fixture
-def flair_root(tmp_path, write_tile) -> str:
-    """A synthetic tree with one area per official split."""
-    root = tmp_path / "data"
-    write_tile(root, "D006_2020", "Z1", ["000001"], ["000001"])  # train
-    write_tile(root, "D004_2021", "Z1", ["000001"], ["000001"])  # validation
-    write_tile(root, "D012_2019", "Z1", ["000001"], ["000001"])  # test
-    return str(root)
+def flair_root(tmp_path, write_flair_dataset) -> str:
+    """A synthetic FLAIR#1 tree with one tile per split."""
+    return str(write_flair_dataset(tmp_path / "flair_1_toy_dataset"))
 
 
 # --------------------------------------------------------------------------- #

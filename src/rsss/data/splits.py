@@ -1,166 +1,149 @@
-"""Official FLAIR#1 train/validation/test domain split.
+"""FLAIR#1 train/validation/test split, read from the dataset's path CSVs.
 
-The FLAIR dataset (French Land cover from Aerial Imagery) is partitioned by
-spatial domain, aligned with French departement boundaries. The lists below
-come from the FLAIR datapaper (NeurIPS 2023 Datasets & Benchmarks, appendix
-A.6.1) and are matched on the domain code (the ``D0xx`` prefix of an area name
-such as ``D004_2021``), so the mapping does not depend on the capture year.
+Both the toy and the full FLAIR#1 dataset describe their split through path
+lists shipped under ``CSVs/``: one CSV per split, each row an ``IMG,MSK`` pair
+whose paths are relative to that directory. Reading those lists is what the
+official baseline does (see the ``csv_toy/`` and ``csv_full/`` folders of
+``IGNF/FLAIR-1``), so the same code ingests either dataset unchanged — only the
+dataset root differs.
+
+The lists are authoritative, not a convenience: the validation tiles live inside
+the train collection directory (``flair_1_toy_aerial_train`` for the toy,
+``flair_aerial_train`` for the full dataset), so no directory scan can tell them
+apart from the train tiles.
 """
 
 from __future__ import annotations
 
+import csv
 import logging
 from pathlib import Path
 
-from rsss.data.data_loader import discover_data
-
 logger = logging.getLogger(__name__)
 
-FLAIR_1_SPLIT: dict[str, set[str]] = {
-    "train": {
-        "D006",
-        "D007",
-        "D008",
-        "D009",
-        "D013",
-        "D016",
-        "D017",
-        "D021",
-        "D023",
-        "D030",
-        "D032",
-        "D033",
-        "D034",
-        "D035",
-        "D038",
-        "D041",
-        "D044",
-        "D046",
-        "D049",
-        "D051",
-        "D052",
-        "D055",
-        "D060",
-        "D063",
-        "D070",
-        "D072",
-        "D074",
-        "D078",
-        "D080",
-        "D081",
-        "D086",
-        "D091",
-    },
-    "validation": {
-        "D004",
-        "D014",
-        "D029",
-        "D031",
-        "D058",
-        "D066",
-        "D067",
-        "D077",
-    },
-    "test": {
-        "D012",
-        "D022",
-        "D026",
-        "D064",
-        "D068",
-        "D071",
-        "D075",
-        "D076",
-        "D083",
-        "D085",
-    },
-}
+CSV_SUBDIR = "CSVs"
 
-_DOMAIN_TO_SPLIT: dict[str, str] = {
-    domain: split for split, domains in FLAIR_1_SPLIT.items() for domain in domains
+# A CSV's split is the last "-"-separated token of its stem, so both
+# "flair-1-paths-train.csv" and "flair-1-paths-toy-train.csv" mean train. "val"
+# is exposed as "validation" to match the Lightning stage names.
+_SPLIT_NAMES: dict[str, str] = {
+    "train": "train",
+    "val": "validation",
+    "validation": "validation",
+    "test": "test",
 }
 
 
-def domain_of(name: str) -> str:
-    """Return the FLAIR domain code of an area name.
+def split_of_csv(csv_path: str | Path) -> str | None:
+    """Return the split a FLAIR path CSV describes.
 
     Parameters
     ----------
-    name : str
-        Area name, e.g. ``"D004_2021"``.
-
-    Returns
-    -------
-    str
-        Domain code, e.g. ``"D004"``.
-    """
-    return name.split("_", 1)[0]
-
-
-def split_of_domain(domain: str) -> str | None:
-    """Return the official split name for a domain code.
-
-    Parameters
-    ----------
-    domain : str
-        Domain code, e.g. ``"D004"``.
+    csv_path : str | Path
+        A ``flair-1-paths-*.csv`` file, e.g. ``...-train.csv`` or
+        ``...-toy-val.csv``.
 
     Returns
     -------
     str | None
-        One of ``"train"``, ``"validation"``, ``"test"``, or ``None`` when the
-        domain is not part of the official FLAIR#1 split.
+        ``"train"``, ``"validation"`` or ``"test"``, or ``None`` when the file
+        name does not end in a known split token.
     """
-    return _DOMAIN_TO_SPLIT.get(domain)
+    return _SPLIT_NAMES.get(Path(csv_path).stem.rsplit("-", 1)[-1].lower())
 
 
-def build_flair_splits(data_dir: str) -> dict[str, dict[str, list[str]]]:
-    """Bucket the locally available tiles into the official FLAIR#1 splits.
+def read_pairs_csv(csv_path: str | Path) -> dict[str, list[str]]:
+    """Read one paths CSV into index-aligned IMG and MSK lists.
+
+    Paths are resolved relative to the CSV's own directory, which is where the
+    datasets' ``../`` prefixes point.
 
     Parameters
     ----------
-    data_dir : str
-        Root directory containing area subdirectories (e.g. "data/").
+    csv_path : str | Path
+        A FLAIR path CSV.
+
+    Returns
+    -------
+    dict[str, list[str]]
+        Dictionary with keys "IMG" and "MSK"; ``IMG[i]`` and ``MSK[i]`` are the
+        same tile.
+
+    Raises
+    ------
+    ValueError
+        If a non-empty row does not hold exactly two fields.
+    """
+    path = Path(csv_path)
+    base = path.parent
+    imgs: list[str] = []
+    msks: list[str] = []
+    with path.open(newline="") as handle:
+        for row in csv.reader(handle):
+            if not row:
+                continue
+            if len(row) != 2:
+                raise ValueError(
+                    f"{path}: expected 'IMG,MSK' rows, got {len(row)} fields: {row!r}."
+                )
+            imgs.append(str((base / row[0].strip()).resolve()))
+            msks.append(str((base / row[1].strip()).resolve()))
+    return {"IMG": imgs, "MSK": msks}
+
+
+def build_flair_splits(dataset_root: str | Path) -> dict[str, dict[str, list[str]]]:
+    """Return the dataset's train/validation/test IMG/MSK path lists.
+
+    Every CSV under ``<dataset_root>/CSVs`` is bucketed by the split its name
+    ends in, so the toy and the full FLAIR#1 dataset go through the same call —
+    only ``dataset_root`` changes.
+
+    Parameters
+    ----------
+    dataset_root : str | Path
+        Root of an extracted FLAIR#1 dataset (toy or full), holding ``CSVs/``
+        and the ``flair*_aerial_*`` / ``flair*_labels_*`` collections the CSVs
+        point at.
 
     Returns
     -------
     dict[str, dict[str, list[str]]]
         One entry per split (``"train"``, ``"validation"``, ``"test"``), each
-        mapping ``"IMG"`` and ``"MSK"`` to the sorted file paths of that split.
+        mapping ``"IMG"`` and ``"MSK"`` to the file paths of that split.
 
-    Notes
-    -----
-    Only a subset of the official domains may be present locally. A warning is
-    logged for every local domain the official mapping does not know (its tiles
-    are dropped, never mixed into a split) and for every official split that
-    has no local data.
+    Raises
+    ------
+    FileNotFoundError
+        If ``CSVs/`` is missing, or one of the three splits has no CSV.
+    ValueError
+        If two CSVs in ``CSVs/`` describe the same split.
     """
-    root = Path(data_dir)
-    files = discover_data(data_dir)
-
-    splits: dict[str, dict[str, list[str]]] = {
-        split: {"IMG": [], "MSK": []} for split in FLAIR_1_SPLIT
-    }
-
-    unknown_areas: set[str] = set()
-    for kind in ("IMG", "MSK"):
-        for path in files[kind]:
-            area = Path(path).relative_to(root).parts[0]
-            split = split_of_domain(domain_of(area))
-            if split is None:
-                unknown_areas.add(area)
-                continue
-            splits[split][kind].append(path)
-
-    for area in sorted(unknown_areas):
-        logger.warning(
-            "Area %s (domain %s) is not part of the official FLAIR#1 split; "
-            "its tiles are ignored.",
-            area,
-            domain_of(area),
+    csv_dir = Path(dataset_root) / CSV_SUBDIR
+    if not csv_dir.is_dir():
+        raise FileNotFoundError(
+            f"No {CSV_SUBDIR!r} directory under {str(dataset_root)!r}: expected an "
+            "extracted FLAIR#1 dataset, whose CSVs hold the split."
         )
 
-    for split, contents in splits.items():
-        if not contents["IMG"]:
-            logger.warning("No local data found for the '%s' split.", split)
+    splits: dict[str, dict[str, list[str]]] = {}
+    for csv_path in sorted(csv_dir.glob("*.csv")):
+        split = split_of_csv(csv_path)
+        if split is None:
+            logger.warning(
+                "Ignoring %s: its name does not end in -train/-val/-test.",
+                csv_path.name,
+            )
+            continue
+        if split in splits:
+            raise ValueError(
+                f"Two CSVs describe the '{split}' split under {str(csv_dir)!r}: "
+                "keep one CSV per split."
+            )
+        splits[split] = read_pairs_csv(csv_path)
 
+    missing = sorted(set(_SPLIT_NAMES.values()) - splits.keys())
+    if missing:
+        raise FileNotFoundError(
+            f"No CSV for the {missing} split(s) under {str(csv_dir)!r}."
+        )
     return splits
