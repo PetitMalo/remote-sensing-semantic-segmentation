@@ -1,8 +1,10 @@
-"""Fixtures shared by the ``rsss.data`` unit tests.
+"""Fixtures shared by the unit tests.
 
 Everything is written to ``tmp_path`` as tiny synthetic GeoTIFFs, so the tests
 never touch the real FLAIR dataset. The fixtures return callables so each test
-can build exactly the tree it needs.
+can build exactly the tree it needs. They sit at the ``tests/`` root, not under
+``tests/data/``, because the training tests reuse them to run a model over real
+``FitDataset`` output.
 """
 
 from __future__ import annotations
