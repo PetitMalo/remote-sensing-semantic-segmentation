@@ -65,6 +65,11 @@ TOY_DATASET = RemoteDataset(
     size=226_168_911,
 )
 
+# Downloadable datasets, keyed by the name a data config may use.
+DATASETS: dict[str, RemoteDataset] = {
+    "flair_1_toy": TOY_DATASET,
+}
+
 
 def download_file(url: str, dest: str | Path, *, size: int | None = None) -> Path:
     """Stream ``url`` to ``dest``, resuming a partial ``<dest>.part`` file.

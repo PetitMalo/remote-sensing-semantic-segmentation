@@ -1,0 +1,8 @@
+# Data source for training and evaluation.
+#
+# data_dir : directory datasets are extracted into (the repo's `data/`).
+# dataset  : key into rsss.data.download.DATASETS.
+# download : fetch the dataset in `prepare_data()` when it is missing.
+data_dir: data
+dataset: flair_1_toy
+download: true

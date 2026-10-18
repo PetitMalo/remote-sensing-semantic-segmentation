@@ -7,11 +7,15 @@ written to ``tmp_path`` via the shared ``write_flair_dataset`` fixture.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from torch.utils.data import RandomSampler, SequentialSampler
 
+from rsss.data.config import DataConfig
 from rsss.data.data_loader import FitDataset, PredictDataset
 from rsss.data.data_module import FlairDatamodule
+from rsss.data.download import TOY_DATASET
 
 # --------------------------------------------------------------------------- #
 # Fixtures                                                                    #
@@ -295,3 +299,82 @@ def test_setup_fit_and_train_dataloader_on_synthetic_tree(flair_root):
 
     assert batch["img"].shape == (1, 5, 4, 4)
     assert batch["msk"].shape == (1, 13, 4, 4)
+
+
+# --------------------------------------------------------------------------- #
+# Data config                                                                 #
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture
+def ensure_calls(monkeypatch) -> list[tuple]:
+    """Patch ``ensure_dataset`` in the datamodule and record its arguments."""
+    calls: list[tuple] = []
+
+    def _ensure(dataset, data_dir, **kwargs):
+        calls.append((dataset, data_dir))
+        return Path(data_dir) / dataset.name
+
+    monkeypatch.setattr("rsss.data.data_module.ensure_dataset", _ensure)
+    return calls
+
+
+def test_config_sets_data_dir_and_download(tmp_path):
+    config = tmp_path / "data.yaml"
+    config.write_text("data_dir: scratch\ndataset: flair_1_toy\ndownload: true\n")
+
+    datamodule = FlairDatamodule(config=config)
+
+    assert datamodule.data_dir == str(Path("scratch") / TOY_DATASET.name)
+    assert datamodule.dataset == "flair_1_toy"
+    assert datamodule.download is True
+
+
+def test_config_accepts_a_dataconfig_object():
+    datamodule = FlairDatamodule(
+        config=DataConfig(data_dir=Path("data"), dataset="flair_1_toy")
+    )
+
+    assert datamodule.data_dir == str(Path("data") / TOY_DATASET.name)
+    assert datamodule.download is False
+
+
+def test_config_conflicts_with_explicit_args():
+    with pytest.raises(ValueError, match="not both"):
+        FlairDatamodule(data_dir="somewhere", config="configs/data.yaml")
+
+
+def test_prepare_data_downloads_the_configured_dataset(tmp_path, ensure_calls):
+    datamodule = FlairDatamodule(
+        data_dir=str(tmp_path / "data/flair_1_toy_dataset"),
+        dataset="flair_1_toy",
+        download=True,
+    )
+
+    datamodule.prepare_data()
+
+    assert ensure_calls == [(TOY_DATASET, tmp_path / "data")]
+
+
+def test_prepare_data_without_download_does_nothing(ensure_calls):
+    datamodule = FlairDatamodule(dataset="flair_1_toy")
+
+    datamodule.prepare_data()
+
+    assert ensure_calls == []
+
+
+def test_prepare_data_requires_a_dataset(ensure_calls):
+    datamodule = FlairDatamodule(download=True)
+
+    with pytest.raises(ValueError, match="requires a dataset"):
+        datamodule.prepare_data()
+
+
+def test_prepare_data_rejects_a_mismatched_data_dir(ensure_calls):
+    datamodule = FlairDatamodule(
+        data_dir="data/wrong_name", dataset="flair_1_toy", download=True
+    )
+
+    with pytest.raises(ValueError, match="must end with"):
+        datamodule.prepare_data()

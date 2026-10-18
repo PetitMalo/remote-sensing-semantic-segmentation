@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from pytorch_lightning import LightningDataModule
 from torch.utils.data import DataLoader
 
+from rsss.data.config import DataConfig, load_data_config
 from rsss.data.data_loader import (
     Augmentation,
     FitDataset,
     PredictDataset,
 )
+from rsss.data.download import DATASETS, ensure_dataset
 from rsss.data.splits import build_flair_splits
 
 
@@ -18,6 +22,21 @@ class FlairDatamodule(LightningDataModule):
     split is read from the dataset's path CSVs (``<data_dir>/CSVs``) via
     :func:`rsss.data.splits.build_flair_splits`. A split that ends up empty
     raises, rather than silently reusing another split's data.
+
+    Point ``config`` at a ``configs/data.yaml`` (or pass a
+    :class:`~rsss.data.config.DataConfig`) to take ``data_dir``, ``dataset`` and
+    ``download`` from it instead of the constructor. When ``download`` is set,
+    ``prepare_data()`` fetches the named dataset before ``setup()`` reads it.
+
+    Parameters
+    ----------
+    config : DataConfig | str | Path, optional
+        Data configuration to read. Mutually exclusive with ``data_dir``,
+        ``dataset`` and ``download``.
+    dataset : str, optional
+        Key into :data:`rsss.data.download.DATASETS`. Required to download.
+    download : bool
+        Fetch ``dataset`` in ``prepare_data()`` when it is missing.
     """
 
     def __init__(
@@ -37,11 +56,28 @@ class FlairDatamodule(LightningDataModule):
         norm_type: str = "scaling",
         means: list | None = None,
         stds: list | None = None,
+        *,
+        config: DataConfig | str | Path | None = None,
+        dataset: str | None = None,
+        download: bool = False,
     ):
         super().__init__()
+        if config is not None:
+            if data_dir != "data" or dataset is not None or download:
+                raise ValueError(
+                    "Pass either `config` or `data_dir`/`dataset`/`download`, not both."
+                )
+            resolved = (
+                config if isinstance(config, DataConfig) else load_data_config(config)
+            )
+            data_dir = str(resolved.dataset_dir)
+            dataset = resolved.dataset
+            download = resolved.download
         if channels is None:
             channels = [1, 2, 3, 4, 5]
         self.data_dir = data_dir
+        self.dataset = dataset
+        self.download = download
         self.dict_train = dict_train
         self.dict_val = dict_val
         self.dict_test = dict_test
@@ -64,7 +100,22 @@ class FlairDatamodule(LightningDataModule):
         self._splits: dict[str, dict[str, list[str]]] | None = None
 
     def prepare_data(self) -> None:
-        pass
+        """Fetch the configured dataset when it is missing, before ``setup()``."""
+        if not self.download:
+            return
+        if self.dataset is None:
+            raise ValueError(
+                "download=True requires a dataset; pass `dataset` or a `config` "
+                "that names one."
+            )
+        remote = DATASETS[self.dataset]
+        root = Path(self.data_dir)
+        if root.name != remote.name:
+            raise ValueError(
+                f"data_dir {self.data_dir!r} must end with {remote.name!r} to "
+                f"download the {self.dataset!r} dataset."
+            )
+        ensure_dataset(remote, root.parent)
 
     def _flair_splits(self) -> dict[str, dict[str, list[str]]]:
         """Return the FLAIR#1 split, reading the CSVs once."""
