@@ -86,9 +86,11 @@ if [ -n "${LIMIT_TRAIN_BATCHES:-}" ]; then
 fi
 
 echo "Job ${SLURM_JOB_ID:-local} on $(hostname); data=$DATA_DIR runs=$RUN_DIR epochs=$EPOCHS"
+# Guard the optional-array expansion: PANDO's bash 4.2 treats an empty
+# "${EXTRA_ARGS[@]}" as an unbound variable under `set -u` (fixed in 4.4).
 uv run "${UV_GROUP_ARGS[@]}" --no-sync python -m rsss.train \
     --data-dir "$DATA_DIR" \
     --output-dir "$RUN_DIR" \
     --max-epochs "$EPOCHS" \
-    "${EXTRA_ARGS[@]}" \
+    ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} \
     --seed 0
