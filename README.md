@@ -68,12 +68,41 @@ dataset from the login node, then submit. Every command there selects the
 `pando` group, because the default stack does not install on PANDO's glibc:
 
 ```bash
+# Login node, in the repository clone.
 uv sync --frozen --no-default-groups --no-dev --group pando
-uv run --no-default-groups --group pando python -m rsss.data.download \
+
+# Stage the dataset. Two trust stores are in play: uv carries its own CA set,
+# and so installs happily, while the CPython it installs trusts only its own
+# bundled certificates and does not see the institute CA that PANDO's HTTPS
+# interception is signed with. SSL_CERT_FILE points Python at the system
+# bundle; without it the download stops at "CERTIFICATE_VERIFY_FAILED:
+# self-signed certificate in certificate chain". If that CA lives outside the
+# bundle, point the variable at the .pem the IT service provides instead.
+SSL_CERT_FILE=/etc/pki/tls/certs/ca-bundle.crt \
+    uv run --no-default-groups --group pando python -m rsss.data.download \
     --data-dir "$HOME/rsss-data"
+
+# Then, from the repository root.
 sbatch scripts/pando/job.sh
 ```
 
 `scripts/pando/job.sh` runs one epoch of the U-Net baseline over the FLAIR#1 toy
 split and writes its log to `logs/slurm-<jobid>.out` and its checkpoints to
-`$HOME/rsss-runs/`. Override `DATA_DIR`, `RUN_DIR` or `EPOCHS` to change that.
+`$HOME/rsss-runs/`. Override `DATA_DIR`, `RUN_DIR` or `EPOCHS` to change that:
+
+```bash
+DATA_DIR=$HOME/rsss-data RUN_DIR=$HOME/rsss-runs/run-01 EPOCHS=2 \
+    sbatch scripts/pando/job.sh
+```
+
+Staging the dataset is the only step that needs the network. If the download
+cannot be made to work at all, copy the archive in by other means:
+`ensure_dataset` accepts a complete `$DATA_DIR/flair_1_toy_dataset.zip`
+(226 168 911 bytes), checks its size, and verifies the tiles it extracts, so
+the result is the same as a direct fetch.
+
+To run an interactive session:
+
+```bash
+srun --pty --partition=gpu --gres=gpu:1 --cpus-per-task=4 --mem=16G --time=01:00:00 /bin/bash
+```
