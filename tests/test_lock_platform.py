@@ -49,7 +49,9 @@ def is_cpython_312_compatible(python_tag: str, abi_tag: str) -> bool:
         return True
     if abi_tag == "abi3":
         match = re.match(r"cp(\d)(\d+)$", python_tag)
-        return match is not None and (int(match.group(1)), int(match.group(2))) <= CPYTHON
+        return (
+            match is not None and (int(match.group(1)), int(match.group(2))) <= CPYTHON
+        )
     return python_tag == f"cp{CPYTHON[0]}{CPYTHON[1]}"
 
 
@@ -118,7 +120,10 @@ def major_minor(version: str) -> tuple[int, int]:
         ("numpy-2.2.6-cp312-cp312-manylinux_2_17_x86_64.whl", (2, 17)),
         ("rasterio-1.4.4-cp312-cp312-manylinux_2_28_x86_64.whl", (2, 28)),
         ("torch-2.14.1-cp312-cp312-manylinux1_x86_64.whl", (2, 5)),
-        ("psutil-7.2.2-cp36-abi3-manylinux2010_x86_64.manylinux_2_28_x86_64.whl", (2, 12)),
+        (
+            "psutil-7.2.2-cp36-abi3-manylinux2010_x86_64.manylinux_2_28_x86_64.whl",
+            (2, 12),
+        ),
         ("numpy-2.5.4-cp312-cp312-macosx_14_0_arm64.whl", None),
     ],
 )
