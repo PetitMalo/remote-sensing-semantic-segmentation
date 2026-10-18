@@ -59,13 +59,15 @@ uv run python -m rsss.train --fast-dev-run    # one batch; no artefacts written
 uv run python -m rsss.train --max-epochs 1    # a real, short run
 ```
 
-Logs and checkpoints land under `--output-dir` (default `outputs/`).
+Logs and checkpoints land under `--output-dir` (default `outputs/`). A run ends
+by scoring the test split; add `--skip-test` to fit only.
 
 ## Run on PANDO
 
-PANDO's compute nodes have no outbound network, so stage the environment and the
-dataset from the login node, then submit. Every command there selects the
-`pando` group, because the default stack does not install on PANDO's glibc:
+PANDO's compute nodes have no outbound network, so stage the environment, the
+dataset and the encoder weights from the login node, then submit. Every command
+there selects the `pando` group, because the default stack does not install on
+PANDO's glibc:
 
 ```bash
 # Login node, in the repository clone.
@@ -82,17 +84,32 @@ SSL_CERT_FILE=/etc/pki/tls/certs/ca-bundle.crt \
     uv run --no-default-groups --group pando python -m rsss.data.download \
     --data-dir "$HOME/rsss-data"
 
+# Stage the encoder weights the model build fetches from the Hugging Face Hub,
+# into the same cache the compute node reads ($HOME/.cache/huggingface).
+SSL_CERT_FILE=/etc/pki/tls/certs/ca-bundle.crt \
+    uv run --no-default-groups --group pando python -m rsss.models.weights \
+    --encoder resnet34
+
 # Then, from the repository root.
 sbatch scripts/pando/job.sh
 ```
 
-`scripts/pando/job.sh` runs one epoch of the U-Net baseline over the FLAIR#1 toy
-split and writes its log to `logs/slurm-<jobid>.out` and its checkpoints to
-`$HOME/rsss-runs/`. Override `DATA_DIR`, `RUN_DIR` or `EPOCHS` to change that:
+`scripts/pando/job.sh` runs the recipe's U-Net baseline for its full 30 epochs
+over the FLAIR#1 toy split, then evaluates on the test split. It fails early if
+either the dataset or the encoder weights were not staged. The log lands in
+`logs/slurm-<jobid>.out` and the checkpoints, CSV metrics and per-class IoU
+under `$HOME/rsss-runs/`. Override `DATA_DIR`, `RUN_DIR`, `EPOCHS` or `ENCODER`
+to change that:
 
 ```bash
 DATA_DIR=$HOME/rsss-data RUN_DIR=$HOME/rsss-runs/run-01 EPOCHS=2 \
     sbatch scripts/pando/job.sh
+```
+
+For a fast smoke test of the GPU path, cap the batches instead of the epochs:
+
+```bash
+EPOCHS=1 LIMIT_TRAIN_BATCHES=2 sbatch scripts/pando/job.sh
 ```
 
 Staging the dataset is the only step that needs the network. If the download
