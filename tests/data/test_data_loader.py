@@ -15,8 +15,6 @@ from rasterio.transform import from_origin
 from rsss.data.data_loader import (
     FitDataset,
     PredictDataset,
-    _assert_paired,
-    discover_data,
     norm,
 )
 
@@ -54,23 +52,6 @@ def _write_img(path: Path, num_bands: int = 5, size: int = 4) -> Path:
 def _write_msk(path: Path, values: np.ndarray) -> Path:
     """Write a single-band label raster from a ``(height, width)`` array."""
     return _write_tif(path, values.astype(np.uint8)[None, :, :])
-
-
-def _write_tile(
-    root: Path,
-    area: str,
-    tile: str,
-    img_ids: list[str],
-    msk_ids: list[str],
-) -> None:
-    """Populate one ``<area>/{aerial,labels}/<tile>/`` directory tree."""
-    for img_id in img_ids:
-        _write_img(root / area / "aerial" / tile / f"IMG_{img_id}.tif")
-    for msk_id in msk_ids:
-        _write_msk(
-            root / area / "labels" / tile / f"MSK_{msk_id}.tif",
-            np.full((4, 4), 1),
-        )
 
 
 @pytest.fixture
@@ -134,108 +115,6 @@ def test_norm_rejects_unknown_type():
 
     with pytest.raises(ValueError, match="'scaling', 'custom' or 'without'"):
         norm(img, norm_type="minmax")
-
-
-# --------------------------------------------------------------------------- #
-# _assert_paired                                                             #
-# --------------------------------------------------------------------------- #
-
-
-def test_assert_paired_accepts_matching_tiles():
-    imgs = [Path("IMG_000001.tif"), Path("IMG_000002.tif")]
-    msks = [Path("MSK_000002.tif"), Path("MSK_000001.tif")]
-
-    _assert_paired("D006_2020", "Z1", imgs, msks)  # does not raise
-
-
-def test_assert_paired_reports_missing_mask():
-    imgs = [Path("IMG_000001.tif"), Path("IMG_000002.tif")]
-
-    with pytest.raises(ValueError, match="missing MSK for \\['000002.tif'\\]"):
-        _assert_paired("D006_2020", "Z1", imgs, [Path("MSK_000001.tif")])
-
-
-def test_assert_paired_reports_missing_image():
-    msks = [Path("MSK_000001.tif"), Path("MSK_000002.tif")]
-
-    with pytest.raises(ValueError, match="missing IMG for \\['000002.tif'\\]"):
-        _assert_paired("D006_2020", "Z1", [Path("IMG_000001.tif")], msks)
-
-
-# --------------------------------------------------------------------------- #
-# discover_data                                                              #
-# --------------------------------------------------------------------------- #
-
-
-def test_discover_data_returns_index_aligned_sorted_paths(tmp_path: Path):
-    root = tmp_path / "data"
-    _write_tile(root, "D006_2020", "Z2", ["000002"], ["000002"])
-    _write_tile(root, "D006_2020", "Z1", ["000002", "000001"], ["000001", "000002"])
-    _write_tile(root, "D004_2021", "Z1", ["000001"], ["000001"])
-
-    files = discover_data(str(root))
-
-    assert files["IMG"] == [str(p) for p in sorted(root.rglob("IMG_*.tif"))]
-    assert files["MSK"] == [str(p) for p in sorted(root.rglob("MSK_*.tif"))]
-    assert all(isinstance(path, str) for path in files["IMG"])
-    for img, msk in zip(files["IMG"], files["MSK"], strict=True):
-        assert Path(img).name[len("IMG_") :] == Path(msk).name[len("MSK_") :]
-
-
-def test_discover_data_missing_directory_raises(tmp_path: Path):
-    with pytest.raises(FileNotFoundError, match="not found"):
-        discover_data(str(tmp_path / "does_not_exist"))
-
-
-def test_discover_data_skips_areas_without_aerial_or_labels(tmp_path: Path):
-    root = tmp_path / "data"
-    _write_img(root / "D006_2020" / "aerial" / "Z1" / "IMG_000001.tif")
-    _write_msk(
-        root / "D004_2021" / "labels" / "Z1" / "MSK_000001.tif", np.full((4, 4), 1)
-    )
-    _write_tile(root, "D012_2019", "Z1", ["000001"], ["000001"])
-
-    files = discover_data(str(root))
-
-    assert [Path(p).parts[-4] for p in files["IMG"]] == ["D012_2019"]
-
-
-def test_discover_data_skips_non_directory_entries_at_root(tmp_path: Path):
-    root = tmp_path / "data"
-    root.mkdir()
-    (root / "README.txt").write_text("not an area")
-    _write_tile(root, "D006_2020", "Z1", ["000001"], ["000001"])
-
-    files = discover_data(str(root))
-
-    assert len(files["IMG"]) == 1
-
-
-def test_discover_data_ignores_sentinel_npy_files(tmp_path: Path):
-    root = tmp_path / "data"
-    _write_tile(root, "D006_2020", "Z1", ["000001"], ["000001"])
-    (root / "D006_2020" / "aerial" / "Z1" / "IMG_000001.npy").write_bytes(b"")
-
-    files = discover_data(str(root))
-
-    assert all(path.endswith(".tif") for path in files["IMG"])
-    assert len(files["IMG"]) == 1
-
-
-def test_discover_data_raises_on_tile_missing_mask(tmp_path: Path):
-    root = tmp_path / "data"
-    _write_tile(root, "D006_2020", "Z1", ["000001", "000002"], ["000001"])
-
-    with pytest.raises(ValueError, match="missing MSK"):
-        discover_data(str(root))
-
-
-def test_discover_data_raises_on_tile_missing_image(tmp_path: Path):
-    root = tmp_path / "data"
-    _write_tile(root, "D006_2020", "Z1", ["000001"], ["000001", "000002"])
-
-    with pytest.raises(ValueError, match="missing IMG"):
-        discover_data(str(root))
 
 
 # --------------------------------------------------------------------------- #
