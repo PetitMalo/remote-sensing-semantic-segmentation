@@ -85,6 +85,7 @@ def write_flair_split(write_img, write_msk):
         tiles: list[tuple[str, str, str]],
         collection: str = "flair_1_toy",
         csv_stem: str = "flair-1-paths-toy",
+        size: int = 4,
     ) -> Path:
         """Write the split's CSV and IMG/MSK files; ``tiles`` are (area, zone, stem)."""
         collection_root = _COLLECTION_ROOTS[split]
@@ -98,8 +99,8 @@ def write_flair_split(write_img, write_msk):
                 f"../{collection}_labels_{collection_root}/"
                 f"{area}/{zone}/msk/MSK_{stem}.tif"
             )
-            write_img((root / "CSVs" / img_rel).resolve())
-            write_msk((root / "CSVs" / msk_rel).resolve(), np.full((4, 4), 1))
+            write_img((root / "CSVs" / img_rel).resolve(), size=size)
+            write_msk((root / "CSVs" / msk_rel).resolve(), np.full((size, size), 1))
             rows.append((img_rel, msk_rel))
 
         csv_path = root / "CSVs" / f"{csv_stem}-{_CSV_SUFFIXES[split]}.csv"
@@ -119,6 +120,7 @@ def write_flair_dataset(write_flair_split):
         root: Path,
         collection: str = "flair_1_toy",
         csv_stem: str = "flair-1-paths-toy",
+        size: int = 4,
     ) -> Path:
         """Write one tile per split and return ``root``."""
         tiles = {
@@ -128,7 +130,12 @@ def write_flair_dataset(write_flair_split):
         }
         for split, split_tiles in tiles.items():
             write_flair_split(
-                root, split, split_tiles, collection=collection, csv_stem=csv_stem
+                root,
+                split,
+                split_tiles,
+                collection=collection,
+                csv_stem=csv_stem,
+                size=size,
             )
         return root
 
