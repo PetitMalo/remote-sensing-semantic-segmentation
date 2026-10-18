@@ -88,6 +88,7 @@ class FlairDatamodule(LightningDataModule):
         self.num_workers = num_workers
         self.train_dataset = None
         self.val_dataset = None
+        self.test_dataset = None
         self.pred_dataset = None
         self.drop_last = drop_last
         self.use_metadata = use_metadata
@@ -178,6 +179,10 @@ class FlairDatamodule(LightningDataModule):
             self.val_dataset = self._make_fit_dataset(
                 self._resolve("validation", self.dict_val, "dict_val"),
             )
+        elif stage == "test":
+            self.test_dataset = self._make_fit_dataset(
+                self._resolve("test", self.dict_test, "dict_test"),
+            )
         elif stage == "predict":
             self.pred_dataset = PredictDataset(
                 dict_files=self._resolve("test", self.dict_test, "dict_test"),
@@ -209,6 +214,17 @@ class FlairDatamodule(LightningDataModule):
             shuffle=False,
             num_workers=self.num_workers,
             drop_last=self.drop_last,
+        )
+
+    def test_dataloader(self):
+        if self.test_dataset is None:
+            raise RuntimeError("Call setup('test') before test_dataloader().")
+        return DataLoader(
+            dataset=self.test_dataset,
+            batch_size=self.batch_size,
+            shuffle=False,
+            num_workers=self.num_workers,
+            drop_last=False,
         )
 
     def predict_dataloader(self):

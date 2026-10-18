@@ -74,6 +74,7 @@ def test_constructor_starts_without_datasets():
 
     assert datamodule.train_dataset is None
     assert datamodule.val_dataset is None
+    assert datamodule.test_dataset is None
     assert datamodule.pred_dataset is None
 
 
@@ -213,6 +214,17 @@ def test_setup_validate_builds_only_val_dataset(discovery_calls):
     assert datamodule.pred_dataset is None
 
 
+def test_setup_test_builds_only_test_dataset(discovery_calls):
+    datamodule = FlairDatamodule()
+
+    datamodule.setup("test")
+
+    assert isinstance(datamodule.test_dataset, FitDataset)
+    assert datamodule.test_dataset.list_imgs.tolist() == ["test_img.tif"]
+    assert datamodule.train_dataset is None
+    assert datamodule.val_dataset is None
+
+
 def test_setup_predict_builds_predict_dataset(discovery_calls):
     datamodule = FlairDatamodule(channels=[1])
 
@@ -245,6 +257,7 @@ def test_setup_predict_prefers_explicit_test_dict(discovery_calls):
     [
         ("train_dataloader", "setup\\('fit'\\)"),
         ("val_dataloader", "setup\\('fit'\\)"),
+        ("test_dataloader", "setup\\('test'\\)"),
         ("predict_dataloader", "setup\\('predict'\\)"),
     ],
 )
@@ -286,6 +299,16 @@ def test_predict_dataloader_uses_single_item_batches(discovery_calls):
     assert isinstance(loader.sampler, SequentialSampler)
 
 
+def test_test_dataloader_preserves_order_and_keeps_the_last_batch(discovery_calls):
+    datamodule = FlairDatamodule(batch_size=8, drop_last=True)
+    datamodule.setup("test")
+
+    loader = datamodule.test_dataloader()
+
+    assert isinstance(loader.sampler, SequentialSampler)
+    assert loader.drop_last is False
+
+
 # --------------------------------------------------------------------------- #
 # End to end (real synthetic files)                                           #
 # --------------------------------------------------------------------------- #
@@ -296,6 +319,16 @@ def test_setup_fit_and_train_dataloader_on_synthetic_tree(flair_root):
 
     datamodule.setup("fit")
     batch = next(iter(datamodule.train_dataloader()))
+
+    assert batch["img"].shape == (1, 5, 4, 4)
+    assert batch["msk"].shape == (1, 13, 4, 4)
+
+
+def test_setup_test_and_test_dataloader_on_synthetic_tree(flair_root):
+    datamodule = FlairDatamodule(data_dir=flair_root, batch_size=1)
+
+    datamodule.setup("test")
+    batch = next(iter(datamodule.test_dataloader()))
 
     assert batch["img"].shape == (1, 5, 4, 4)
     assert batch["msk"].shape == (1, 13, 4, 4)
