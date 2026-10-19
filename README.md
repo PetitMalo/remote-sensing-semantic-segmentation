@@ -195,3 +195,93 @@ To run an interactive session:
 ```bash
 srun --pty --partition=gpu --gres=gpu:1 --cpus-per-task=4 --mem=16G --time=01:00:00 /bin/bash
 ```
+
+## Run on GCP
+
+Training runs on a single spot GPU VM (one NVIDIA L4) that GCS feeds and
+collects from: the dataset, the code archive and the run artefacts all live in
+one bucket, created in the zone's region so transfers to the VM stay local.
+`configs/gcp.yaml` holds the project, zone, bucket, image and disk.
+
+### One-time setup
+
+Create the bucket and the service account the VM runs as, and grant it access to
+the bucket. No key file is involved: the account comes from the instance
+metadata.
+
+```bash
+gcloud services enable compute.googleapis.com storage.googleapis.com \
+    --project rsss-project
+
+gcloud storage buckets create gs://rsss-data-bucket \
+    --project rsss-project --location=europe-west4 \
+    --uniform-bucket-level-access
+
+gcloud iam service-accounts create rsss-vm --project rsss-project
+gcloud storage buckets add-iam-policy-binding gs://rsss-data-bucket \
+    --member=serviceAccount:rsss-vm@rsss-project.iam.gserviceaccount.com \
+    --role=roles/storage.objectAdmin
+```
+
+Check the zone has L4 capacity and the project has GPU quota (`NVIDIA_L4_GPUS`,
+and `PREEMPTIBLE_NVIDIA_L4_GPUS` for spot), then edit `configs/gcp.yaml` if any
+of the values differ.
+
+### Submit a run
+
+The VM runs the committed HEAD, so commit first: the launcher refuses a dirty
+worktree. The first run also stages the full dataset from IGN into GCS
+(~65 GiB), which takes a while; every later run pulls it from the bucket
+instead. The boot disk (200 GB in `configs/gcp.yaml`) holds the extracted tree
+and, at peak, the archives it is extracted from.
+
+```bash
+RUN=unet-gcp-01 EPOCHS=30 scripts/gcp/submit.sh
+
+# A smoke run on the toy dataset: one epoch over two batches.
+scripts/gcp/submit.sh --run unet-smoke --epochs 1 --limit-train-batches 2 \
+    --data-config configs/data.yaml
+
+# Print the gcloud commands without uploading or creating anything.
+scripts/gcp/submit.sh --run unet-gcp-01 --dry-run
+```
+
+The launcher archives the commit, uploads it to `gs://<bucket>/code/<sha>.tar.gz`
+once per commit, renders the VM's startup script and creates the instance. It
+prints the commands that follow it:
+
+```bash
+gcloud compute ssh rsss-unet-gcp-01 --project rsss-project \
+    --zone europe-west4-a -- tail -f /var/log/rsss-startup.log
+gcloud storage ls -r gs://rsss-data-bucket/runs/unet-gcp-01/
+```
+
+If the VM dies before the log exists, read the boot console instead:
+
+```bash
+gcloud compute instances get-serial-port-output rsss-unet-gcp-01 \
+    --project rsss-project --zone europe-west4-a
+```
+
+A spot VM can be preempted at any time. The job uploads the run directory every
+10 minutes, and a checkpoint only becomes `last.ckpt` after its upload has
+completed, so a resubmission resumes cleanly:
+
+```bash
+RUN=unet-gcp-01 RESUME=last EPOCHS=30 scripts/gcp/submit.sh
+```
+
+The VM shuts itself down when the job ends, whatever the outcome; delete it to
+stop paying for the boot disk. `configs/gcp.yaml` also caps the run with
+`max_run_duration`, after which the instance is deleted outright.
+
+### Inspect a run
+
+```bash
+scripts/gcp/pull_run.sh unet-gcp-01
+uv run python -m rsss.predict \
+    --checkpoint outputs/gcp/unet-gcp-01/checkpoints/last.ckpt \
+    --metrics    outputs/gcp/unet-gcp-01/csv \
+    --data-dir   data \
+    --output-dir outputs/gcp/unet-gcp-01/figures
+```
