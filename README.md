@@ -62,6 +62,29 @@ uv run python -m rsss.train --max-epochs 1    # a real, short run
 Logs and checkpoints land under `--output-dir` (default `outputs/`). A run ends
 by scoring the test split; add `--skip-test` to fit only.
 
+## Inspect a run
+
+Copy a checkpoint and its logs back from PANDO into the gitignored `outputs/`
+(the run directory is `~/rsss-runs/unet-<jobid>` there), then draw the
+predictions and the training curves locally:
+
+```bash
+PANDO=you@pando-login.example.fr
+RUN=unet-4022046
+rsync -avz --progress "$PANDO:rsss-runs/$RUN/" "outputs/pando/$RUN/"
+
+uv run python -m rsss.predict \
+    --checkpoint "outputs/pando/$RUN/checkpoints/<epoch>-<step>.ckpt" \
+    --metrics    "outputs/pando/$RUN/csv" \
+    --data-dir   data \
+    --output-dir "outputs/pando/$RUN/figures"
+```
+
+`predictions.png` shows a few test tiles as image / ground truth / prediction,
+and, when `--metrics` is given, `results.png` draws the loss, mIoU and per-class
+IoU curves. The plots need matplotlib, which lives in the `dev` group, so run
+this step locally rather than on the cluster.
+
 ## Run on PANDO
 
 PANDO's compute nodes have no outbound network, so stage the environment, the
