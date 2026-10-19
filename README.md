@@ -71,12 +71,24 @@ and `configs/data.yaml` the data source; the flags only override per-run choices
 uv run python -m rsss.train --help
 uv run python -m rsss.train --fast-dev-run    # one batch; no artefacts written
 uv run python -m rsss.train --max-epochs 1    # a real, short run
+
+# Full FLAIR#1 with the official normalization
+uv run python -m rsss.train --data-config configs/data_full.yaml \
+    --data-dir /scratch/me/rsss-data --output-dir /scratch/me/runs/unet-full-01
+
+# Continue an interrupted run to its total epoch count
+uv run python -m rsss.train --data-config configs/data_full.yaml \
+    --data-dir /scratch/me/rsss-data --output-dir /scratch/me/runs/unet-full-01 \
+    --max-epochs 30 --resume
 ```
 
 Logs and checkpoints land under `--output-dir` (default `outputs/`). A run keeps
 only two checkpoints, `last.ckpt` and the one with the best validation mIoU, so
 its directory does not grow with the epoch count. It ends by scoring the test
 split, on the weights `last.ckpt` holds; add `--skip-test` to fit only.
+`--resume` alone continues from `<output-dir>/checkpoints/last.ckpt`; pass a
+path instead to pick another checkpoint. `--max-epochs` is always the total for
+the run, not the number of extra epochs.
 
 ## Inspect a run
 
@@ -127,9 +139,10 @@ uv sync --frozen --no-default-groups --no-dev --group pando
 # bundle; without it the download stops at "CERTIFICATE_VERIFY_FAILED:
 # self-signed certificate in certificate chain". If that CA lives outside the
 # bundle, point the variable at the .pem the IT service provides instead.
+# Point DATA_DIR at a scratch filesystem: the full dataset is ~65 GiB extracted.
 SSL_CERT_FILE=/etc/pki/tls/certs/ca-bundle.crt \
     uv run --no-default-groups --group pando python -m rsss.data.download \
-    --data-dir "$HOME/rsss-data"
+    --dataset flair_1_full --data-dir "$HOME/rsss-data"
 
 # Stage the encoder weights the model build fetches from the Hugging Face Hub,
 # into the same cache the compute node reads ($HOME/.cache/huggingface).
@@ -138,32 +151,40 @@ SSL_CERT_FILE=/etc/pki/tls/certs/ca-bundle.crt \
     --encoder resnet34
 
 # Then, from the repository root.
-sbatch scripts/pando/job.sh
-```
-
-`scripts/pando/job.sh` runs the recipe's U-Net baseline for its full 30 epochs
-over the FLAIR#1 toy split, then evaluates on the test split. It fails early if
-either the dataset or the encoder weights were not staged. The log lands in
-`logs/slurm-<jobid>.out` and the checkpoints, CSV metrics and per-class IoU
-under `$HOME/rsss-runs/`. Override `DATA_DIR`, `RUN_DIR`, `EPOCHS` or `ENCODER`
-to change that:
-
-```bash
-DATA_DIR=$HOME/rsss-data RUN_DIR=$HOME/rsss-runs/run-01 EPOCHS=2 \
+DATA_DIR=$HOME/rsss-data RUN_DIR=$HOME/rsss-runs/unet-full-01 \
     sbatch scripts/pando/job.sh
 ```
 
-For a fast smoke test of the GPU path, cap the batches instead of the epochs:
+`scripts/pando/job.sh` runs the U-Net baseline for 30 epochs over the full
+FLAIR#1 dataset by default, then evaluates on the test split. It allocates 24
+hours; if the run hits the walltime, submit it again with the same `RUN_DIR` and
+`RESUME=last` to continue to epoch 30. It fails early if either the dataset or
+the encoder weights were not staged. The log lands in `logs/slurm-<jobid>.out`
+and the checkpoints, CSV metrics and per-class IoU under `RUN_DIR`. Override
+`DATA_DIR`, `RUN_DIR`, `EPOCHS`, `ENCODER` or `RESUME` to change that:
 
 ```bash
-EPOCHS=1 LIMIT_TRAIN_BATCHES=2 sbatch scripts/pando/job.sh
+DATA_DIR=/scratch/me/rsss-data RUN_DIR=/scratch/me/runs/run-01 EPOCHS=2 \
+    sbatch scripts/pando/job.sh
+
+# Finish a run that reached the walltime.
+DATA_DIR=/scratch/me/rsss-data RUN_DIR=/scratch/me/runs/run-01 RESUME=last \
+    sbatch scripts/pando/job.sh
+```
+
+For a toy smoke test of the GPU path, select the toy config and cap the batches:
+
+```bash
+DATA_CONFIG=configs/data.yaml DATASET=flair_1_toy EPOCHS=1 \
+    LIMIT_TRAIN_BATCHES=2 sbatch scripts/pando/job.sh
 ```
 
 Staging the dataset is the only step that needs the network. If the download
-cannot be made to work at all, copy the archive in by other means:
-`ensure_dataset` accepts a complete `$DATA_DIR/flair_1_toy_dataset.zip`
-(226 168 911 bytes), checks its size, and verifies the tiles it extracts, so
-the result is the same as a direct fetch.
+cannot be made to work at all, copy the archives in by other means:
+`ensure_dataset` accepts a complete toy archive at
+`$DATA_DIR/flair_1_toy_dataset.zip` (226 168 911 bytes), and for the full
+dataset it reuses any of the four archives whose size matches, so a manually
+copied `flair_aerial_train.zip` (54 458 900 252 bytes) is picked up too.
 
 Once a job has finished, `scripts/pando/upload_run.sh` (login node) copies its
 run directory and Slurm log to the bucket, ready to pull locally: see

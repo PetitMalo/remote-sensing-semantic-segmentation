@@ -40,4 +40,9 @@ datamodule:
   # ever reports CUDA out of memory.
   batch_size: 4
   num_workers: 8
-  norm_type: scaling
+  # FLAIR#1's official normalization: per-band mean/std over the raw 0..255
+  # values, as used by the IGN baseline. 'scaling' (divide by 255) is only
+  # appropriate for a backbone trained on [0, 1] inputs.
+  norm_type: custom
+  means: [105.08, 110.87, 101.82, 106.38, 53.26]
+  stds: [52.17, 45.38, 44.0, 39.69, 79.3]

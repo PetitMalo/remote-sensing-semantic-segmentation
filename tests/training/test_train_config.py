@@ -73,6 +73,10 @@ def test_the_shipped_config_loads():
     assert config.num_classes == 13
     assert config.model["name"] == "unet"
     assert config.model["in_channels"] == 5
+    # FLAIR#1's official per-band normalization, over the raw 0..255 values.
+    assert config.datamodule["norm_type"] == "custom"
+    assert len(config.datamodule["means"]) == 5
+    assert len(config.datamodule["stds"]) == 5
 
 
 def test_missing_file_raises(tmp_path):
