@@ -9,11 +9,17 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import torch
 import yaml
+from pytorch_lightning.callbacks import ModelCheckpoint
+from torch import nn
 
 from rsss.data.download import TOY_DATASET
+from rsss.models import register_model
 from rsss.train import (
+    CHECKPOINT_MONITOR,
     build_arg_parser,
+    build_checkpoint_callbacks,
     build_datamodule,
     build_module,
     build_trainer,
@@ -22,9 +28,23 @@ from rsss.train import (
 )
 from rsss.training.config import TrainConfig
 
-# Large enough for the UNet's five downsampling stages.
 TILE_SIZE = 64
-TINY_MODEL = {"name": "unet", "encoder_weights": None, "in_channels": 5}
+
+
+# These tests check the entry point's wiring, not an architecture: a tiny model
+# keeps each fit and each of its two checkpoints small, where the real U-Net's
+# are ~300 MB apiece.
+@register_model("tiny_seg")
+def _build_tiny_seg(in_channels: int = 5, classes: int = 13) -> nn.Module:
+    """Return a two-convolution segmentation model for the smoke fits."""
+    return nn.Sequential(
+        nn.Conv2d(in_channels, 4, kernel_size=3, padding=1),
+        nn.ReLU(),
+        nn.Conv2d(4, classes, kernel_size=1),
+    )
+
+
+TINY_MODEL = {"name": "tiny_seg", "in_channels": 5}
 
 
 def parse(argv: list[str]):
@@ -155,6 +175,28 @@ def test_trainer_honours_the_recipe_and_the_flags(tmp_path):
     assert trainer.limit_train_batches == 5
 
 
+def test_checkpoint_callbacks_keep_only_best_and_last(tmp_path):
+    best, last = build_checkpoint_callbacks(tmp_path)
+    assert isinstance(best, ModelCheckpoint)
+    assert isinstance(last, ModelCheckpoint)
+
+    # The best checkpoint is chosen on the metric the module logs at validation
+    # end, so the score and the weights belong to the same epoch.
+    assert CHECKPOINT_MONITOR == "val/mIoU"
+    assert best.monitor == CHECKPOINT_MONITOR
+    assert best.mode == "max"
+    assert best.save_top_k == 1
+    # A separate callback, because save_last alone would duplicate the best
+    # checkpoint instead of writing the final epoch's weights.
+    assert last.save_top_k == 0
+    assert last.save_last is True
+
+    assert best.dirpath == last.dirpath
+    assert Path(str(best.dirpath)) == tmp_path / "checkpoints"
+    assert best._save_on_train_epoch_end is False
+    assert last._save_on_train_epoch_end is False
+
+
 # --------------------------------------------------------------------------- #
 # End to end                                                                  #
 # --------------------------------------------------------------------------- #
@@ -211,12 +253,35 @@ def test_run_fits_and_writes_its_artefacts(smoke_argv, tmp_path):
 
     # ``callback_metrics`` holds only the test pass once the fit is over, so the
     # train/val metrics are asserted through the CSVLogger artefacts instead.
-    assert list((tmp_path / "outputs" / "checkpoints").glob("*.ckpt"))
+    checkpoints = sorted(
+        path.name for path in (tmp_path / "outputs" / "checkpoints").glob("*.ckpt")
+    )
+    assert "last.ckpt" in checkpoints
+    assert len(checkpoints) == 2
     csv_files = list((tmp_path / "outputs" / "csv").rglob("metrics.csv"))
     assert csv_files
     logged = "\n".join(path.read_text() for path in csv_files)
     assert "train/loss" in logged
     assert "val/mIoU" in logged
+
+
+@pytest.mark.filterwarnings("ignore:.*does not have many workers")
+@pytest.mark.filterwarnings("ignore:.*compute.*called before the.*update")
+def test_more_epochs_do_not_accumulate_checkpoints(smoke_argv, tmp_path):
+    trainer = run(parse([*smoke_argv, "--max-epochs", "2"]))
+
+    # Beyond the best and the last checkpoint, later epochs must not leave a
+    # file behind: they are what fills the run directory and the bucket.
+    checkpoints = list((tmp_path / "outputs" / "checkpoints").glob("*.ckpt"))
+    assert len(checkpoints) == 2
+
+    # ``last.ckpt`` is the final epoch's state, not a copy of the best one.
+    last = torch.load(
+        tmp_path / "outputs" / "checkpoints" / "last.ckpt",
+        map_location="cpu",
+        weights_only=False,
+    )
+    assert last["global_step"] == trainer.global_step
 
 
 @pytest.mark.filterwarnings("ignore:.*does not have many workers")

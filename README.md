@@ -59,8 +59,10 @@ uv run python -m rsss.train --fast-dev-run    # one batch; no artefacts written
 uv run python -m rsss.train --max-epochs 1    # a real, short run
 ```
 
-Logs and checkpoints land under `--output-dir` (default `outputs/`). A run ends
-by scoring the test split; add `--skip-test` to fit only.
+Logs and checkpoints land under `--output-dir` (default `outputs/`). A run keeps
+only two checkpoints, `last.ckpt` and the one with the best validation mIoU, so
+its directory does not grow with the epoch count. It ends by scoring the test
+split, on the weights `last.ckpt` holds; add `--skip-test` to fit only.
 
 ## Inspect a run
 
@@ -80,7 +82,7 @@ RUN=unet-4022046
 rclone copy "scw:rsss-bucket/runs/$RUN/" "outputs/pando/$RUN/" --progress
 
 uv run python -m rsss.predict \
-    --checkpoint "outputs/pando/$RUN/checkpoints/<epoch>-<step>.ckpt" \
+    --checkpoint "outputs/pando/$RUN/checkpoints/last.ckpt" \
     --metrics    "outputs/pando/$RUN/csv" \
     --data-dir   data \
     --output-dir "outputs/pando/$RUN/figures"
@@ -89,7 +91,9 @@ uv run python -m rsss.predict \
 `predictions.png` shows a few test tiles as image / ground truth / prediction,
 and, when `--metrics` is given, `results.png` draws the loss, mIoU and per-class
 IoU curves. The plots need matplotlib, which lives in the `dev` group, so run
-this step locally rather than on the cluster.
+this step locally rather than on the cluster. `last.ckpt` holds the weights the
+test split was scored with; the `<epoch>-<step>.ckpt` beside it is the best
+validation mIoU, if you would rather predict from that one.
 
 ## Run on PANDO
 
