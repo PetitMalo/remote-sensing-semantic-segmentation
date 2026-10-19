@@ -1,0 +1,12 @@
+# Data source for the full FLAIR#1 training run.
+#
+# data_dir : directory datasets are assembled under (the repo's `data/`).
+# dataset  : key into rsss.data.download.DATASETS.
+# download : fetch the four archives and the split CSVs when missing.
+#
+# Staging needs ~65 GiB extracted and ~120 GiB free at peak, since the largest
+# archive (51 GiB) and its extracted tree coexist. On PANDO, point --data-dir at
+# a scratch filesystem.
+data_dir: data
+dataset: flair_1_full
+download: true
