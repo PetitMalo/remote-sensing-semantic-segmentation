@@ -64,14 +64,20 @@ by scoring the test split; add `--skip-test` to fit only.
 
 ## Inspect a run
 
-Copy a checkpoint and its logs back from PANDO into the gitignored `outputs/`
-(the run directory is `~/rsss-runs/unet-<jobid>` there), then draw the
-predictions and the training curves locally:
+The compute nodes have no outbound network, so a finished run travels through
+the Scaleway bucket: upload it from the login node, pull it locally, then draw
+the predictions and the training curves. The bucket is the `rclone` remote
+`scw` (run `rclone listremotes` to confirm the name), and the run directory on
+PANDO is `~/rsss-runs/unet-<jobid>`:
 
 ```bash
-PANDO=you@pando-login.example.fr
+# PANDO login node, in the repository clone: push the newest run (or set
+# RUN_DIR to pick one).
+scripts/pando/upload_run.sh
+
+# Locally, in the repository clone: pull that run into gitignored outputs/.
 RUN=unet-4022046
-rsync -avz --progress "$PANDO:rsss-runs/$RUN/" "outputs/pando/$RUN/"
+rclone copy "scw:rsss-bucket/runs/$RUN/" "outputs/pando/$RUN/" --progress
 
 uv run python -m rsss.predict \
     --checkpoint "outputs/pando/$RUN/checkpoints/<epoch>-<step>.ckpt" \
@@ -140,6 +146,10 @@ cannot be made to work at all, copy the archive in by other means:
 `ensure_dataset` accepts a complete `$DATA_DIR/flair_1_toy_dataset.zip`
 (226 168 911 bytes), checks its size, and verifies the tiles it extracts, so
 the result is the same as a direct fetch.
+
+Once a job has finished, `scripts/pando/upload_run.sh` (login node) copies its
+run directory and Slurm log to the bucket, ready to pull locally: see
+[Inspect a run](#inspect-a-run).
 
 To run an interactive session:
 
