@@ -1,0 +1,27 @@
+# Where and how a GCP training VM is created.
+#
+# project : GCP project that owns the VM and the bucket.
+# zone    : an L4 zone with spot capacity; europe-west1-b is a fallback.
+# bucket  : holds data/, code/ and runs/ under one prefix each. Create it in
+#           the zone's region so transfers to the VM stay free and local.
+# machine_type : g2-standard-8 bundles one NVIDIA L4 (24 GB).
+# image_* : a Deep Learning VM with a 580+ driver. The `gcp` dependency group
+#           installs CUDA 13 wheels, which a 570 driver cannot load. List the
+#           families with:
+#             gcloud compute images list --project deeplearning-platform-release \
+#                 --filter="family~common-cu130"
+# boot_disk_size_gb : the extracted FLAIR#1 tree is ~65 GiB, with ~120 GiB
+#                     needed at peak while the largest archive is extracted.
+# service_account : needs objectAdmin on the bucket; no key file is used.
+# max_run_duration : cost guard; the VM is deleted when it elapses.
+project: rsss-project
+zone: europe-west4-a
+bucket: rsss-data-bucket
+
+machine_type: g2-standard-8
+image_family: common-cu130-ubuntu-2204
+image_project: deeplearning-platform-release
+boot_disk_size_gb: 200
+boot_disk_type: pd-balanced
+service_account: rsss-vm@rsss-project.iam.gserviceaccount.com
+max_run_duration: 24h
