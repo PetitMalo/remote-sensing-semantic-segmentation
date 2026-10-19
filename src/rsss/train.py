@@ -19,7 +19,7 @@ from typing import Any
 
 import pytorch_lightning as pl
 from loguru import logger
-from pytorch_lightning.callbacks import ModelCheckpoint
+from pytorch_lightning.callbacks import Callback, ModelCheckpoint
 from pytorch_lightning.loggers import CSVLogger
 
 from rsss.data.config import load_data_config
@@ -30,6 +30,10 @@ from rsss.training.module import SegmentationModule
 DEFAULT_TRAIN_CONFIG = "configs/train.yaml"
 DEFAULT_DATA_CONFIG = "configs/data.yaml"
 DEFAULT_OUTPUT_DIR = "outputs"
+# Metric the best checkpoint tracks, as logged by the module's
+# on_validation_epoch_end. Keeping it here and in the tests avoids a silent
+# mismatch between the module's metric names and the callback's monitor.
+CHECKPOINT_MONITOR = "val/mIoU"
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -119,6 +123,39 @@ def _trainer_kwargs(config: TrainConfig, args: argparse.Namespace) -> dict[str, 
     return kwargs
 
 
+def build_checkpoint_callbacks(output_dir: str | Path) -> list[Callback]:
+    """Return the callbacks that keep the best and the last epoch's weights.
+
+    Two callbacks, not one with ``save_last=True``: Lightning only refreshes
+    ``last.ckpt`` when another checkpoint is written, so on a run whose final
+    epoch is not a new best it would duplicate the best file instead of holding
+    the final weights.
+
+    ``save_on_train_epoch_end=False`` is required as well: with the default, the
+    checkpoint is written at the end of the training epoch, before the
+    validation that produces ``val/mIoU``. Its filename and score would then
+    describe the previous epoch while its weights come from the current one.
+    """
+    dirpath = Path(output_dir) / "checkpoints"
+    return [
+        ModelCheckpoint(
+            dirpath=dirpath,
+            filename="{epoch}-{step}",
+            monitor=CHECKPOINT_MONITOR,
+            mode="max",
+            save_top_k=1,
+            save_on_train_epoch_end=False,
+        ),
+        ModelCheckpoint(
+            dirpath=dirpath,
+            filename="{epoch}-{step}",
+            save_top_k=0,
+            save_last=True,
+            save_on_train_epoch_end=False,
+        ),
+    ]
+
+
 def build_trainer(config: TrainConfig, args: argparse.Namespace) -> pl.Trainer:
     """Build the Trainer, logging and checkpointing under ``--output-dir``."""
     if args.seed is not None:
@@ -127,13 +164,7 @@ def build_trainer(config: TrainConfig, args: argparse.Namespace) -> pl.Trainer:
     return pl.Trainer(
         **_trainer_kwargs(config, args),
         logger=CSVLogger(save_dir=str(output_dir), name="csv"),
-        callbacks=[
-            ModelCheckpoint(
-                dirpath=output_dir / "checkpoints",
-                filename="{epoch}-{step}",
-                save_top_k=-1,
-            )
-        ],
+        callbacks=build_checkpoint_callbacks(output_dir),
     )
 
 
