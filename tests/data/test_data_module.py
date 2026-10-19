@@ -15,7 +15,7 @@ from torch.utils.data import RandomSampler, SequentialSampler
 from rsss.data.config import DataConfig
 from rsss.data.data_loader import FitDataset, PredictDataset
 from rsss.data.data_module import FlairDatamodule
-from rsss.data.download import TOY_DATASET
+from rsss.data.download import FULL_DATASET, TOY_DATASET
 
 # --------------------------------------------------------------------------- #
 # Fixtures                                                                    #
@@ -387,6 +387,27 @@ def test_prepare_data_downloads_the_configured_dataset(tmp_path, ensure_calls):
     datamodule.prepare_data()
 
     assert ensure_calls == [(TOY_DATASET, tmp_path / "data")]
+
+
+def test_prepare_data_downloads_the_full_dataset(tmp_path, ensure_calls):
+    datamodule = FlairDatamodule(
+        data_dir=str(tmp_path / "data/flair_1_full_dataset"),
+        dataset="flair_1_full",
+        download=True,
+    )
+
+    datamodule.prepare_data()
+
+    assert ensure_calls == [(FULL_DATASET, tmp_path / "data")]
+
+
+def test_full_config_resolves_the_full_root():
+    datamodule = FlairDatamodule(
+        config=DataConfig(data_dir=Path("scratch"), dataset="flair_1_full")
+    )
+
+    assert datamodule.data_dir == str(Path("scratch") / "flair_1_full_dataset")
+    assert datamodule.dataset == "flair_1_full"
 
 
 def test_prepare_data_without_download_does_nothing(ensure_calls):

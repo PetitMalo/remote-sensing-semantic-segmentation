@@ -41,12 +41,26 @@ uv run pytest -q
 
 ## Data
 
-`configs/data.yaml` names the dataset and where it is extracted. The pipeline
-downloads, extracts and verifies it on first use; by hand:
+`configs/data.yaml` names the toy dataset used by tests and smoke runs, and
+`configs/data_full.yaml` the full FLAIR#1 dataset. The pipeline downloads,
+extracts and verifies the selected dataset on first use:
 
 ```bash
-uv run python -m rsss.data.download --data-dir data
+# Toy (216 MiB)
+uv run python -m rsss.data.download --dataset flair_1_toy --data-dir data
+
+# Full FLAIR#1: four archives plus the three split CSVs, ~65 GiB extracted
+uv run python -m rsss.data.download --dataset flair_1_full --data-dir data
+
+# Check an already-staged tree without downloading
+uv run python -m rsss.data.download --dataset flair_1_full --data-dir data \
+    --verify-only
 ```
+
+The full dataset needs roughly 120 GiB free at peak: the largest archive is
+51 GiB and is extracted before it is deleted. Stage it on a scratch filesystem
+on the cluster. An interrupted staging run resumes, skipping archives already
+extracted; pass `--force` to rebuild a tree that fails verification.
 
 ## Train
 

@@ -13,7 +13,7 @@ from pathlib import Path
 
 import yaml
 
-from rsss.data.download import DATASETS, RemoteDataset
+from rsss.data.download import DATASETS, Dataset
 
 _CONFIG_KEYS = frozenset({"data_dir", "dataset", "download"})
 _REQUIRED_KEYS = frozenset({"data_dir", "dataset"})
@@ -38,8 +38,8 @@ class DataConfig:
     download: bool = False
 
     @property
-    def remote(self) -> RemoteDataset:
-        """The downloadable archive ``dataset`` names."""
+    def remote(self) -> Dataset:
+        """The downloadable dataset ``dataset`` names."""
         return DATASETS[self.dataset]
 
     @property

@@ -17,11 +17,16 @@ import numpy as np
 import pytest
 
 from rsss.data.download import (
+    FULL_DATASET,
     TOY_DATASET,
+    FullDataset,
+    RemoteArchive,
     RemoteDataset,
+    archive_filename,
     download_file,
     ensure_dataset,
     extract_zip,
+    main,
     verify_flair_dataset,
 )
 
@@ -88,6 +93,45 @@ def test_toy_dataset_points_at_the_ovh_archive():
     assert TOY_DATASET.url.endswith("/flair_1_toy_dataset.zip")
     assert "storage.gra.cloud.ovh.net" in TOY_DATASET.url
     assert TOY_DATASET.size == 226_168_911
+
+
+def test_full_dataset_points_at_four_archives_and_three_csvs():
+    assert isinstance(FULL_DATASET, FullDataset)
+    assert FULL_DATASET.name == "flair_1_full_dataset"
+
+    archives = {archive_filename(a.url): a for a in FULL_DATASET.archives}
+    assert set(archives) == {
+        "flair_aerial_train.zip",
+        "flair_labels_train.zip",
+        "flair_1_aerial_test.zip",
+        "flair_1_labels_test.zip",
+    }
+    assert archives["flair_aerial_train.zip"].size == 54_458_900_252
+    assert archives["flair_labels_train.zip"].size == 509_091_073
+    assert archives["flair_1_aerial_test.zip"].size == 14_463_094_631
+    assert archives["flair_1_labels_test.zip"].size == 130_481_211
+    # The upstream test CSV points at ../data/..., so those archives must land
+    # there rather than at the dataset root.
+    assert archives["flair_1_aerial_test.zip"].extract_to == Path(
+        "flair_1_full_dataset/data"
+    )
+    assert archives["flair_1_aerial_test.zip"].provides == Path(
+        "data/flair_1_aerial_test"
+    )
+    assert set(FULL_DATASET.csv_urls) == {
+        "flair-1-paths-train.csv",
+        "flair-1-paths-val.csv",
+        "flair-1-paths-test.csv",
+    }
+    assert all("/csv_full/" in url for url in FULL_DATASET.csv_urls.values())
+    assert FULL_DATASET.size == sum(a.size for a in FULL_DATASET.archives)
+
+
+def test_archive_filename_reads_the_last_url_segment():
+    assert (
+        archive_filename("https://host.example/defi-ia/flair_data_1/a.zip?x=1")
+        == "a.zip"
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -282,3 +326,182 @@ def test_ensure_dataset_downloads_extracts_verifies_and_drops_the_zip(
     assert root == data_dir / "toy"
     assert (root / "CSVs").is_dir()
     assert not (data_dir / "toy.zip").exists()
+
+
+# --------------------------------------------------------------------------- #
+# ensure_dataset: full dataset                                                #
+# --------------------------------------------------------------------------- #
+
+# Archive name -> (extract_to, provides) mirroring FULL_DATASET.
+FULL_LOCAL_LAYOUT = {
+    "flair_aerial_train.zip": (
+        Path("flair_1_full_dataset"),
+        Path("flair_aerial_train"),
+    ),
+    "flair_labels_train.zip": (
+        Path("flair_1_full_dataset"),
+        Path("flair_labels_train"),
+    ),
+    "flair_1_aerial_test.zip": (
+        Path("flair_1_full_dataset/data"),
+        Path("data/flair_1_aerial_test"),
+    ),
+    "flair_1_labels_test.zip": (
+        Path("flair_1_full_dataset/data"),
+        Path("data/flair_1_labels_test"),
+    ),
+}
+
+FULL_CSV_NAMES = (
+    "flair-1-paths-train.csv",
+    "flair-1-paths-val.csv",
+    "flair-1-paths-test.csv",
+)
+
+
+def _write_full_staging(staging: Path, write_img, write_msk) -> None:
+    """Write the four collections and three CSVs of a synthetic full dataset."""
+    write_img(
+        staging / "flair_aerial_train/D006_2020/Z1_UU/img/IMG_000001.tif", size=512
+    )
+    write_msk(
+        staging / "flair_labels_train/D006_2020/Z1_UU/msk/MSK_000001.tif",
+        np.ones((512, 512)),
+    )
+    write_img(
+        staging / "flair_aerial_train/D004_2021/Z9_UN/img/IMG_000734.tif", size=512
+    )
+    write_msk(
+        staging / "flair_labels_train/D004_2021/Z9_UN/msk/MSK_000734.tif",
+        np.ones((512, 512)),
+    )
+    write_img(
+        staging / "flair_1_aerial_test/D012_2019/Z3_UU/img/IMG_061946.tif", size=512
+    )
+    write_msk(
+        staging / "flair_1_labels_test/D012_2019/Z3_UU/msk/MSK_061946.tif",
+        np.ones((512, 512)),
+    )
+
+    csv_dir = staging / "csv"
+    csv_dir.mkdir(parents=True)
+    (csv_dir / "flair-1-paths-train.csv").write_text(
+        "../flair_aerial_train/D006_2020/Z1_UU/img/IMG_000001.tif,"
+        "../flair_labels_train/D006_2020/Z1_UU/msk/MSK_000001.tif\n"
+    )
+    (csv_dir / "flair-1-paths-val.csv").write_text(
+        "../flair_aerial_train/D004_2021/Z9_UN/img/IMG_000734.tif,"
+        "../flair_labels_train/D004_2021/Z9_UN/msk/MSK_000734.tif\n"
+    )
+    (csv_dir / "flair-1-paths-test.csv").write_text(
+        "../data/flair_1_aerial_test/D012_2019/Z3_UU/img/IMG_061946.tif,"
+        "../data/flair_1_labels_test/D012_2019/Z3_UU/msk/MSK_061946.tif\n"
+    )
+
+
+def _zip_tree(source: Path, archive: Path) -> Path:
+    """Zip ``source`` so its own name is the archive's top-level directory."""
+    with zipfile.ZipFile(archive, "w") as handle:
+        for path in sorted(source.rglob("*")):
+            if path.is_file():
+                handle.write(
+                    path, arcname=(source.name / path.relative_to(source)).as_posix()
+                )
+    return archive
+
+
+def _local_full_dataset(http_server) -> FullDataset:
+    """Build FULL_DATASET's shape with local URLs and real archive sizes."""
+    return FullDataset(
+        name="flair_1_full_dataset",
+        archives=tuple(
+            RemoteArchive(
+                url=f"{http_server.base}/{name}",
+                size=(http_server.directory / name).stat().st_size,
+                extract_to=extract_to,
+                provides=provides,
+            )
+            for name, (extract_to, provides) in FULL_LOCAL_LAYOUT.items()
+        ),
+        csv_urls={name: f"{http_server.base}/csv/{name}" for name in FULL_CSV_NAMES},
+    )
+
+
+@pytest.fixture
+def served_full_dataset(tmp_path, http_server, write_img, write_msk):
+    """Serve a synthetic full dataset and return its local spec."""
+    staging = tmp_path / "staging"
+    _write_full_staging(staging, write_img, write_msk)
+    for name in FULL_LOCAL_LAYOUT:
+        _zip_tree(staging / name.removesuffix(".zip"), http_server.directory / name)
+    (http_server.directory / "csv").mkdir()
+    for name in FULL_CSV_NAMES:
+        (http_server.directory / "csv" / name).write_bytes(
+            (staging / "csv" / name).read_bytes()
+        )
+    return _local_full_dataset(http_server)
+
+
+def test_ensure_full_dataset_stages_archives_and_csvs(tmp_path, served_full_dataset):
+    data_dir = tmp_path / "data"
+
+    root = ensure_dataset(served_full_dataset, data_dir)
+
+    assert root == data_dir / "flair_1_full_dataset"
+    assert (root / "CSVs/flair-1-paths-train.csv").is_file()
+    assert (root / "CSVs/flair-1-paths-val.csv").is_file()
+    assert (root / "CSVs/flair-1-paths-test.csv").is_file()
+    assert (root / "flair_aerial_train/D006_2020/Z1_UU/img/IMG_000001.tif").is_file()
+    assert (
+        root / "data/flair_1_aerial_test/D012_2019/Z3_UU/img/IMG_061946.tif"
+    ).is_file()
+    assert not list(data_dir.glob("*.zip"))
+    assert verify_flair_dataset(root).tiles_per_split == {
+        "train": 1,
+        "validation": 1,
+        "test": 1,
+    }
+
+
+def test_ensure_full_dataset_reuses_a_verified_tree(
+    tmp_path, served_full_dataset, http_server
+):
+    data_dir = tmp_path / "data"
+    root = ensure_dataset(served_full_dataset, data_dir)
+    requests_after_staging = len(http_server.ranges)
+
+    reused = ensure_dataset(served_full_dataset, data_dir)
+
+    assert reused == root
+    assert len(http_server.ranges) == requests_after_staging
+
+
+def test_ensure_full_dataset_keeps_an_invalid_tree(
+    tmp_path, served_full_dataset, write_msk
+):
+    data_dir = tmp_path / "data"
+    root = ensure_dataset(served_full_dataset, data_dir)
+    write_msk(
+        root / "data/flair_1_labels_test/D012_2019/Z3_UU/msk/MSK_061946.tif",
+        np.full((512, 512), 14),
+    )
+
+    with pytest.raises(ValueError, match="--force"):
+        ensure_dataset(served_full_dataset, data_dir)
+
+    # Rebuilding costs a full re-download, so the tree must survive the error.
+    assert (root / "flair_aerial_train/D006_2020/Z1_UU/img/IMG_000001.tif").is_file()
+
+
+def test_main_selects_the_full_dataset(tmp_path, monkeypatch):
+    calls: list[tuple] = []
+
+    def _ensure(dataset, data_dir, **kwargs):
+        calls.append((dataset, Path(data_dir)))
+        return Path(data_dir) / dataset.name
+
+    monkeypatch.setattr("rsss.data.download.ensure_dataset", _ensure)
+
+    main(["--dataset", "flair_1_full", "--data-dir", str(tmp_path)])
+
+    assert calls == [(FULL_DATASET, tmp_path)]

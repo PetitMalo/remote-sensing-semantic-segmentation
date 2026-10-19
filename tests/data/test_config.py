@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from rsss.data.config import DataConfig, load_data_config
-from rsss.data.download import TOY_DATASET
+from rsss.data.download import FULL_DATASET, TOY_DATASET
 
 
 def _write(tmp_path: Path, text: str) -> Path:
@@ -85,5 +85,15 @@ def test_shipped_config_loads():
     """The committed ``configs/data.yaml`` must stay loadable."""
     config = load_data_config(Path(__file__).parents[2] / "configs/data.yaml")
 
-    assert config.dataset in {"flair_1_toy"}
+    assert config.dataset == "flair_1_toy"
     assert config.dataset_dir.name == TOY_DATASET.name
+
+
+def test_shipped_full_config_loads():
+    """The committed ``configs/data_full.yaml`` must select the full dataset."""
+    config = load_data_config(Path(__file__).parents[2] / "configs/data_full.yaml")
+
+    assert config.dataset == "flair_1_full"
+    assert config.remote is FULL_DATASET
+    assert config.dataset_dir.name == "flair_1_full_dataset"
+    assert config.dataset_dir == Path("data") / "flair_1_full_dataset"
