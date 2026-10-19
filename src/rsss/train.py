@@ -6,6 +6,7 @@ and ``configs/data.yaml``; the flags only override what has to change per run:
 the dataset location and the output directory on a cluster, or a quick smoke
 fit. A fit is followed by an evaluation on the test split, whose per-class IoU
 is reported alongside the validation metrics; ``--skip-test`` turns that off.
+``--resume`` continues a fit from ``<output-dir>/checkpoints/last.ckpt``.
 Example: ``uv run python -m rsss.train --fast-dev-run --output-dir
 /scratch/me/runs/smoke``.
 """
@@ -88,7 +89,49 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help="Seed Python, NumPy and torch (and the dataloader workers).",
     )
+    parser.add_argument(
+        "--resume",
+        nargs="?",
+        const="last",
+        default=None,
+        metavar="CHECKPOINT",
+        help="Resume from CHECKPOINT, or from "
+        "<output-dir>/checkpoints/last.ckpt when the value is omitted. "
+        "--max-epochs stays the total, not the number of extra epochs.",
+    )
     return parser
+
+
+def resolve_resume_checkpoint(args: argparse.Namespace) -> Path | None:
+    """Return the checkpoint ``--resume`` selects, or None to start fresh.
+
+    Parameters
+    ----------
+    args : argparse.Namespace
+        Parsed entry-point arguments.
+
+    Returns
+    -------
+    Path | None
+        The checkpoint to pass to ``Trainer.fit``, or None for a fresh fit.
+
+    Raises
+    ------
+    FileNotFoundError
+        If the requested checkpoint does not exist.
+    """
+    if args.resume is None:
+        return None
+    if args.resume == "last":
+        checkpoint = Path(args.output_dir) / "checkpoints" / "last.ckpt"
+    else:
+        checkpoint = Path(args.resume)
+    if not checkpoint.is_file():
+        raise FileNotFoundError(
+            f"No checkpoint to resume from at {checkpoint}. Run without "
+            "--resume first, or pass a checkpoint that exists."
+        )
+    return checkpoint
 
 
 def build_datamodule(config: TrainConfig, args: argparse.Namespace) -> FlairDatamodule:
@@ -174,8 +217,12 @@ def run(args: argparse.Namespace) -> pl.Trainer:
     The test split is scored right after the fit, on the weights the last epoch
     left, unless ``--skip-test`` is given. Returning the Trainer keeps the run
     inspectable from a caller (and from the tests), instead of hiding the run
-    behind the exit code.
+    behind the exit code. With ``--resume`` the fit continues from a checkpoint,
+    which is how a run longer than one Slurm allocation finishes.
     """
+    if args.fast_dev_run and args.resume is not None:
+        raise ValueError("--fast-dev-run and --resume are mutually exclusive.")
+    checkpoint = resolve_resume_checkpoint(args)
     config = load_train_config(args.config)
     datamodule = build_datamodule(config, args)
     module = build_module(config)
@@ -186,7 +233,7 @@ def run(args: argparse.Namespace) -> pl.Trainer:
         config.num_classes,
         args.output_dir,
     )
-    trainer.fit(module, datamodule=datamodule)
+    trainer.fit(module, datamodule=datamodule, ckpt_path=checkpoint)
     if not args.skip_test:
         trainer.test(module, datamodule=datamodule)
     return trainer

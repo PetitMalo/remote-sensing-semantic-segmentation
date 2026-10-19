@@ -24,6 +24,7 @@ from rsss.train import (
     build_module,
     build_trainer,
     main,
+    resolve_resume_checkpoint,
     run,
 )
 from rsss.training.config import TrainConfig
@@ -69,6 +70,7 @@ def test_parser_defaults_to_the_shipped_configs():
     assert args.fast_dev_run is False
     assert args.skip_test is False
     assert args.seed is None
+    assert args.resume is None
 
 
 def test_parser_reads_every_override():
@@ -90,6 +92,8 @@ def test_parser_reads_every_override():
             "--skip-test",
             "--seed",
             "7",
+            "--resume",
+            "last",
         ]
     )
 
@@ -102,6 +106,40 @@ def test_parser_reads_every_override():
     assert args.fast_dev_run is True
     assert args.skip_test is True
     assert args.seed == 7
+    assert args.resume == "last"
+
+
+def test_resume_without_a_value_means_last(tmp_path):
+    checkpoint = tmp_path / "checkpoints" / "last.ckpt"
+    checkpoint.parent.mkdir()
+    checkpoint.write_bytes(b"state")
+
+    resolved = resolve_resume_checkpoint(
+        parse(["--output-dir", str(tmp_path), "--resume"])
+    )
+
+    assert resolved == checkpoint
+
+
+def test_resume_accepts_an_explicit_checkpoint(tmp_path):
+    checkpoint = tmp_path / "epoch-3.ckpt"
+    checkpoint.write_bytes(b"state")
+
+    resolved = resolve_resume_checkpoint(parse(["--resume", str(checkpoint)]))
+
+    assert resolved == checkpoint
+
+
+def test_resume_rejects_a_missing_checkpoint(tmp_path):
+    with pytest.raises(FileNotFoundError, match="No checkpoint to resume from"):
+        resolve_resume_checkpoint(
+            parse(["--output-dir", str(tmp_path), "--resume", "last"])
+        )
+
+
+def test_fast_dev_run_and_resume_are_mutually_exclusive():
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        run(parse(["--fast-dev-run", "--resume"]))
 
 
 # --------------------------------------------------------------------------- #
@@ -298,6 +336,21 @@ def test_skip_test_leaves_the_test_split_unscored(smoke_argv):
     trainer = run(parse([*smoke_argv, "--skip-test"]))
 
     assert "test/mIoU" not in trainer.callback_metrics
+
+
+@pytest.mark.filterwarnings("ignore:.*does not have many workers")
+@pytest.mark.filterwarnings("ignore:.*compute.*called before the.*update")
+def test_resume_continues_the_fit_from_last(smoke_argv):
+    first = run(parse([*smoke_argv, "--skip-test"]))
+
+    resumed = run(
+        parse([*smoke_argv, "--max-epochs", "2", "--resume", "last", "--skip-test"])
+    )
+
+    # Lightning increments current_epoch after the last epoch, so a run resumed
+    # from epoch 1 and stopped at max_epochs=2 reports 2 here.
+    assert resumed.current_epoch == 2
+    assert resumed.global_step > first.global_step
 
 
 @pytest.mark.filterwarnings("ignore:.*does not have many workers")
