@@ -237,6 +237,43 @@ class FetchReport:
         )
 
 
+def member_infos(
+    url: str,
+    size: int,
+    *,
+    block_size: int = _BLOCK_SIZE,
+    timeout: float = _TIMEOUT,
+    max_retries: int = _MAX_RETRIES,
+) -> dict[str, int]:
+    """Return every member's size in bytes, read from the remote central directory.
+
+    Only the archive tables are fetched, never a member, so this is what sizes a
+    staging run before any tile is read.
+
+    Parameters
+    ----------
+    url : str
+        URL of the remote zip archive.
+    size : int
+        Exact archive size in bytes.
+    block_size, timeout, max_retries
+        Passed to :class:`HTTPRangeFile`.
+
+    Returns
+    -------
+    dict[str, int]
+        Member name to its uncompressed size in bytes.
+    """
+    remote = HTTPRangeFile(
+        url, size, block_size=block_size, timeout=timeout, max_retries=max_retries
+    )
+    try:
+        with zipfile.ZipFile(remote) as archive:
+            return {info.filename: info.file_size for info in archive.infolist()}
+    finally:
+        remote.close()
+
+
 def _fetch_group(
     url: str,
     size: int,
@@ -324,14 +361,9 @@ def fetch_members(
     if not destinations:
         return FetchReport(url=url, extracted=0, skipped=0, bytes_downloaded=0)
 
-    remote = HTTPRangeFile(
+    present = member_infos(
         url, size, block_size=block_size, timeout=timeout, max_retries=max_retries
     )
-    try:
-        with zipfile.ZipFile(remote) as archive:
-            present = {info.filename for info in archive.infolist()}
-    finally:
-        remote.close()
     missing = sorted(name for name in destinations if name not in present)
     if missing:
         shown = ", ".join(missing[:3]) + (", ..." if len(missing) > 3 else "")

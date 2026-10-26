@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from rsss.data.remote_zip import HTTPRangeFile, fetch_members
+from rsss.data.remote_zip import HTTPRangeFile, fetch_members, member_infos
 
 if TYPE_CHECKING:
     from tests.conftest import RangeServer
@@ -93,6 +93,16 @@ def test_http_range_file_refuses_a_server_ignoring_ranges(
         pytest.raises(RuntimeError, match="range"),
     ):
         remote.read()
+
+
+def test_member_infos_sizes_the_archive_without_extracting_it(
+    served_zip: tuple[str, int, dict[str, bytes]],
+) -> None:
+    url, size, members = served_zip
+
+    infos = member_infos(url, size)
+
+    assert infos == {name: len(data) for name, data in members.items()}
 
 
 def test_fetch_members_extracts_only_the_requested_members(
