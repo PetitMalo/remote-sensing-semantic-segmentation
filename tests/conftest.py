@@ -10,7 +10,11 @@ can build exactly the tree it needs. They sit at the ``tests/`` root, not under
 from __future__ import annotations
 
 import csv
+import threading
+from collections.abc import Iterator
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import cast
 
 import numpy as np
 import pytest
@@ -142,3 +146,101 @@ def write_flair_dataset(write_flair_split):
         return root
 
     return _write_flair_dataset
+
+
+class RangeServer:
+    """A local HTTP server serving ``root`` and honouring ``Range`` requests.
+
+    It stands in for IGN's OVH storage: the remote-zip and subset-staging tests
+    write their synthetic archives and CSVs under ``root`` and point the code at
+    ``url``, so no test ever touches the network. ``ignore_range`` makes it
+    answer ``200`` to a ranged GET (to test that the reader refuses such a
+    server), ``failures`` returns that many ``503`` responses first (to test the
+    retry path), and ``requests`` records every ``(path, Range)`` received.
+    """
+
+    def __init__(self, root: Path) -> None:
+        self.root = root
+        self.url = ""
+        self.ignore_range = False
+        self.failures = 0
+        self.requests: list[tuple[str, str | None]] = []
+        self._server: _RangeHTTPServer | None = None
+        self._thread: threading.Thread | None = None
+
+    def route(self, relative: str) -> str:
+        """Return the absolute URL of ``relative`` under the served root."""
+        return f"{self.url}/{relative}"
+
+    def start(self) -> RangeServer:
+        """Bind an ephemeral port and serve in a background thread."""
+        self._server = _RangeHTTPServer(("127.0.0.1", 0), _RangeHandler)
+        self._server.state = self
+        self._server.daemon_threads = True
+        self.url = f"http://127.0.0.1:{self._server.server_address[1]}"
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._thread.start()
+        return self
+
+    def stop(self) -> None:
+        """Stop the server and release its socket."""
+        if self._server is not None:
+            self._server.shutdown()
+            self._server.server_close()
+        if self._thread is not None:
+            self._thread.join(timeout=5)
+
+
+class _RangeHTTPServer(ThreadingHTTPServer):
+    """The HTTP server carrying the shared :class:`RangeServer` state."""
+
+    state: RangeServer
+
+
+class _RangeHandler(BaseHTTPRequestHandler):
+    """Serve files from ``RangeServer.root``, slicing the requested byte range."""
+
+    def do_GET(self) -> None:
+        server = cast(_RangeHTTPServer, self.server)
+        state = server.state
+        path = state.root / self.path.split("?", 1)[0].lstrip("/")
+        if not path.is_file():
+            self.send_error(404)
+            return
+        state.requests.append((self.path, self.headers.get("Range")))
+        if state.failures:
+            state.failures -= 1
+            self.send_error(503)
+            return
+        data = path.read_bytes()
+        range_header = self.headers.get("Range")
+        if range_header and not state.ignore_range:
+            span = range_header.partition("=")[2]
+            start_text, _, end_text = span.partition("-")
+            start = int(start_text)
+            end = int(end_text) if end_text else len(data) - 1
+            chunk = data[start : end + 1]
+            self.send_response(206)
+            self.send_header("Content-Range", f"bytes {start}-{end}/{len(data)}")
+            self.send_header("Content-Length", str(len(chunk)))
+            self.send_header("Accept-Ranges", "bytes")
+            self.end_headers()
+            self.wfile.write(chunk)
+            return
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def log_message(self, format: str, *args: object) -> None:
+        """Stay quiet: pytest captures what it needs."""
+
+
+@pytest.fixture
+def range_server(tmp_path: Path) -> Iterator[RangeServer]:
+    """Serve ``<tmp_path>/served`` over HTTP with Range support, for one test."""
+    root = tmp_path / "served"
+    root.mkdir()
+    server = RangeServer(root).start()
+    yield server
+    server.stop()
