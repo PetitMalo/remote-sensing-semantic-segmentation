@@ -4,7 +4,7 @@
 # dataset  : key into rsss.data.download.DATASETS.
 # download : fetch the four archives and the split CSVs when missing.
 #
-# Staging needs ~65 GiB extracted and ~120 GiB free at peak, since the largest
+# Staging needs 95 GiB extracted and ~146 GiB free at peak, since the largest
 # archive (51 GiB) and its extracted tree coexist. On PANDO, point --data-dir at
 # a scratch filesystem.
 data_dir: data

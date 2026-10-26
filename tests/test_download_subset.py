@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 import pytest
 
+from rsss.data.config import load_data_config
 from rsss.data.download import (
     FullDataset,
     RemoteArchive,
@@ -239,6 +240,16 @@ def test_report_only_sizes_the_subset_without_fetching_tiles(
     assert not (root / "flair_aerial_train").exists()
     assert (root / "CSVs/flair-1-paths-train.csv").is_file()
     assert subset_split_sizes(subset, root) == fake_flair.bytes_per_split
+
+
+def test_data_subset_config_selects_the_subset_dataset() -> None:
+    config = load_data_config(
+        Path(__file__).parents[1] / "configs" / "data_subset.yaml"
+    )
+
+    assert config.dataset == "flair_1_subset"
+    assert config.dataset_dir.name == "flair_1_subset_dataset"
+    assert config.download
 
 
 def test_main_rejects_subset_flags_for_the_full_dataset() -> None:

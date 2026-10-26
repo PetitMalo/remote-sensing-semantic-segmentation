@@ -41,26 +41,40 @@ uv run pytest -q
 
 ## Data
 
-`configs/data.yaml` names the toy dataset used by tests and smoke runs, and
-`configs/data_full.yaml` the full FLAIR#1 dataset. The pipeline downloads,
-extracts and verifies the selected dataset on first use:
+`configs/data.yaml` names the toy dataset used by tests and smoke runs,
+`configs/data_full.yaml` the full FLAIR#1 dataset, and `configs/data_subset.yaml`
+a whole-domain subset of it for clusters that cannot hold the full tree. The
+pipeline downloads, extracts and verifies the selected dataset on first use:
 
 ```bash
 # Toy (216 MiB)
 uv run python -m rsss.data.download --dataset flair_1_toy --data-dir data
 
-# Full FLAIR#1: four archives plus the three split CSVs, ~65 GiB extracted
+# Full FLAIR#1: four archives plus the three split CSVs, 95 GiB extracted
 uv run python -m rsss.data.download --dataset flair_1_full --data-dir data
 
+# Subset: the alphabetically first 21 train, 8 validation and 10 test domains
+# (29,087 / 14,125 / 15,700 tiles, 72.6 GiB), fetched tile by tile -- no archive
+# is ever staged, so peak disk equals the final tree.
+uv run python -m rsss.data.download --dataset flair_1_subset --data-dir data \
+    --report-only   # size it first, without fetching any tile
+uv run python -m rsss.data.download --dataset flair_1_subset --data-dir data
+# Change the recipe (domains per split, alphabetically first):
+uv run python -m rsss.data.download --dataset flair_1_subset --data-dir data \
+    --num-domains 10,4,5
+
 # Check an already-staged tree without downloading
-uv run python -m rsss.data.download --dataset flair_1_full --data-dir data \
+uv run python -m rsss.data.download --dataset flair_1_subset --data-dir data \
     --verify-only
 ```
 
-The full dataset needs roughly 120 GiB free at peak: the largest archive is
+The full dataset needs roughly 146 GiB free at peak: the largest archive is
 51 GiB and is extracted before it is deleted. Stage it on a scratch filesystem
 on the cluster. An interrupted staging run resumes, skipping archives already
-extracted; pass `--force` to rebuild a tree that fails verification.
+extracted; pass `--force` to rebuild a tree that fails verification. The subset
+needs only its final 72.6 GiB, and records the domains it kept in
+`<data-dir>/flair_1_subset_dataset/subset_manifest.json`; `--force` is what
+rebuilds it with another `--num-domains` recipe.
 
 ## Train
 
@@ -139,10 +153,15 @@ uv sync --frozen --no-default-groups --no-dev --group pando
 # bundle; without it the download stops at "CERTIFICATE_VERIFY_FAILED:
 # self-signed certificate in certificate chain". If that CA lives outside the
 # bundle, point the variable at the .pem the IT service provides instead.
-# Point DATA_DIR at a scratch filesystem: the full dataset is ~65 GiB extracted.
+# The subset is 72.6 GiB and is fetched tile by tile; --report-only only reads
+# the split CSVs and the remote archive tables, so run it first to check the
+# numbers against the quota.
 SSL_CERT_FILE=/etc/pki/tls/certs/ca-bundle.crt \
     uv run --no-default-groups --group pando python -m rsss.data.download \
-    --dataset flair_1_full --data-dir "$HOME/rsss-data"
+    --dataset flair_1_subset --data-dir "$HOME/rsss-data" --report-only
+SSL_CERT_FILE=/etc/pki/tls/certs/ca-bundle.crt \
+    uv run --no-default-groups --group pando python -m rsss.data.download \
+    --dataset flair_1_subset --data-dir "$HOME/rsss-data"
 
 # Stage the encoder weights the model build fetches from the Hugging Face Hub,
 # into the same cache the compute node reads ($HOME/.cache/huggingface).
@@ -151,12 +170,15 @@ SSL_CERT_FILE=/etc/pki/tls/certs/ca-bundle.crt \
     --encoder resnet34
 
 # Then, from the repository root.
-DATA_DIR=$HOME/rsss-data RUN_DIR=$HOME/rsss-runs/unet-full-01 \
+DATA_DIR=$HOME/rsss-data RUN_DIR=$HOME/rsss-runs/unet-subset-01 \
     sbatch scripts/pando/job.sh
 ```
 
-`scripts/pando/job.sh` runs the U-Net baseline for 30 epochs over the full
-FLAIR#1 dataset by default, then evaluates on the test split. It allocates 24
+`scripts/pando/job.sh` runs the U-Net baseline for 30 epochs over the FLAIR#1
+subset by default (whole domains: 29,087 train, 14,125 val, 15,700 test tiles),
+then evaluates on the test split. The full dataset stays reachable with
+`DATA_CONFIG=configs/data_full.yaml DATASET=flair_1_full`, where the quota
+allows its ~146 GiB peak. It allocates 24
 hours; if the run hits the walltime, submit it again with the same `RUN_DIR` and
 `RESUME=last` to continue to epoch 30. It fails early if either the dataset or
 the encoder weights were not staged. The log lands in `logs/slurm-<jobid>.out`
@@ -231,7 +253,7 @@ of the values differ.
 
 The VM runs the committed HEAD, so commit first: the launcher refuses a dirty
 worktree. The first run also stages the full dataset from IGN into GCS
-(~65 GiB), which takes a while; every later run pulls it from the bucket
+(~95 GiB), which takes a while; every later run pulls it from the bucket
 instead. The boot disk (200 GB in `configs/gcp.yaml`) holds the extracted tree
 and, at peak, the archives it is extracted from.
 
