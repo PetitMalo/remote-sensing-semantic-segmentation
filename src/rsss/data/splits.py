@@ -52,6 +52,43 @@ def split_of_csv(csv_path: str | Path) -> str | None:
     return _SPLIT_NAMES.get(Path(csv_path).stem.rsplit("-", 1)[-1].lower())
 
 
+def read_pairs_rows(csv_path: str | Path) -> list[tuple[str, str]]:
+    """Read one paths CSV into its raw ``(IMG, MSK)`` rows.
+
+    The rows keep the paths exactly as written, relative to the CSV's own
+    directory; :func:`read_pairs_csv` is what resolves them. Filtering a split
+    rewrites these rows (see :mod:`rsss.data.subset`), so they have to survive a
+    read/write round trip unchanged.
+
+    Parameters
+    ----------
+    csv_path : str | Path
+        A FLAIR path CSV.
+
+    Returns
+    -------
+    list[tuple[str, str]]
+        One ``(image, mask)`` pair per non-empty row, in file order.
+
+    Raises
+    ------
+    ValueError
+        If a non-empty row does not hold exactly two fields.
+    """
+    path = Path(csv_path)
+    rows: list[tuple[str, str]] = []
+    with path.open(newline="") as handle:
+        for row in csv.reader(handle):
+            if not row:
+                continue
+            if len(row) != 2:
+                raise ValueError(
+                    f"{path}: expected 'IMG,MSK' rows, got {len(row)} fields: {row!r}."
+                )
+            rows.append((row[0].strip(), row[1].strip()))
+    return rows
+
+
 def read_pairs_csv(csv_path: str | Path) -> dict[str, list[str]]:
     """Read one paths CSV into index-aligned IMG and MSK lists.
 
@@ -68,27 +105,13 @@ def read_pairs_csv(csv_path: str | Path) -> dict[str, list[str]]:
     dict[str, list[str]]
         Dictionary with keys "IMG" and "MSK"; ``IMG[i]`` and ``MSK[i]`` are the
         same tile.
-
-    Raises
-    ------
-    ValueError
-        If a non-empty row does not hold exactly two fields.
     """
-    path = Path(csv_path)
-    base = path.parent
-    imgs: list[str] = []
-    msks: list[str] = []
-    with path.open(newline="") as handle:
-        for row in csv.reader(handle):
-            if not row:
-                continue
-            if len(row) != 2:
-                raise ValueError(
-                    f"{path}: expected 'IMG,MSK' rows, got {len(row)} fields: {row!r}."
-                )
-            imgs.append(str((base / row[0].strip()).resolve()))
-            msks.append(str((base / row[1].strip()).resolve()))
-    return {"IMG": imgs, "MSK": msks}
+    base = Path(csv_path).parent
+    rows = read_pairs_rows(csv_path)
+    return {
+        "IMG": [str((base / image).resolve()) for image, _ in rows],
+        "MSK": [str((base / mask).resolve()) for _, mask in rows],
+    }
 
 
 def build_flair_splits(dataset_root: str | Path) -> dict[str, dict[str, list[str]]]:
