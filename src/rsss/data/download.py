@@ -17,15 +17,24 @@ import shutil
 import urllib.error
 import urllib.request
 import zipfile
-from collections.abc import Mapping
-from dataclasses import dataclass
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass, replace
 from pathlib import Path
 from urllib.parse import urlparse
 
 import rasterio
 from loguru import logger
 
-from rsss.data.splits import CSV_SUBDIR, build_flair_splits
+from rsss.data.remote_zip import fetch_members, member_infos
+from rsss.data.splits import CSV_SUBDIR, build_flair_splits, split_of_csv
+from rsss.data.subset import (
+    SUBSET_ROOT_NAME,
+    SubsetSpec,
+    build_subset_csvs,
+    manifest_matches,
+    read_manifest,
+    write_manifest,
+)
 
 # IGN's OVH Swift container holding the official FLAIR#1 archives.
 _FLAIR_1_BASE_URL = (
@@ -121,6 +130,30 @@ class FullDataset:
         return sum(archive.size for archive in self.archives)
 
 
+@dataclass(frozen=True)
+class SubsetDataset:
+    """A whole-domain subset of a :class:`FullDataset`'s archives.
+
+    The full dataset is never staged: the subset keeps whole spatial domains per
+    split (see :class:`rsss.data.subset.SubsetSpec`), fetches only the members
+    the filtered CSVs name, directly out of the remote archives, and verifies
+    the result like any other FLAIR#1 tree.
+
+    Parameters
+    ----------
+    name : str
+        Directory the subset is assembled into, under ``data_dir``.
+    full : FullDataset
+        Dataset to take the domains from; its archives are read remotely.
+    spec : SubsetSpec
+        Domains to keep per split.
+    """
+
+    name: str
+    full: FullDataset
+    spec: SubsetSpec
+
+
 # The three split CSVs live in the FLAIR-1 repository, not in any archive.
 _FLAIR_1_CSV_BASE_URL = "https://raw.githubusercontent.com/IGNF/FLAIR-1/main/csv_full"
 _FLAIR_1_FULL_ROOT = "flair_1_full_dataset"
@@ -162,12 +195,23 @@ FULL_DATASET = FullDataset(
     },
 )
 
-Dataset = RemoteDataset | FullDataset
+Dataset = RemoteDataset | FullDataset | SubsetDataset
+
+# FLAIR#1 subset: the recipe that fits a 75 GiB staging budget, measured from the
+# remote central directories (58,912 tiles, 72.6 GiB). Domains are taken
+# alphabetically, so this selects the same tiles on every machine: the first 21
+# train domains, all 8 validation domains, all 10 test.
+SUBSET_DATASET = SubsetDataset(
+    name=SUBSET_ROOT_NAME,
+    full=FULL_DATASET,
+    spec=SubsetSpec(),
+)
 
 # Downloadable datasets, keyed by the name a data config may use.
 DATASETS: dict[str, Dataset] = {
     "flair_1_toy": TOY_DATASET,
     "flair_1_full": FULL_DATASET,
+    "flair_1_subset": SUBSET_DATASET,
 }
 
 
@@ -409,9 +453,11 @@ def _stage_archive(
         zip_path.unlink()
 
 
-def _stage_csvs(csv_urls: Mapping[str, str], root: Path) -> None:
-    """Download any missing split CSV into ``<root>/CSVs``."""
-    csv_dir = root / CSV_SUBDIR
+def _stage_csvs(
+    csv_urls: Mapping[str, str], root: Path, *, subdir: str = CSV_SUBDIR
+) -> None:
+    """Download any missing split CSV into ``<root>/<subdir>``."""
+    csv_dir = root / subdir
     for name, url in csv_urls.items():
         dest = csv_dir / name
         if dest.is_file() and dest.stat().st_size > 0:
@@ -500,12 +546,252 @@ def ensure_full_dataset(
     return root
 
 
+# Official CSVs are kept pristine under this subdirectory, so a rerun always
+# filters from the full lists rather than from an already-filtered subset.
+_SOURCE_CSV_SUBDIR = "source_csvs"
+
+
+def members_for_archive(
+    archive: RemoteArchive,
+    full_name: str,
+    dataset_root: str | Path,
+    wanted: Iterable[Path],
+) -> dict[str, Path]:
+    """Map the wanted files ``archive`` provides to their member names.
+
+    ``archive.extract_to`` is relative to the data directory while
+    ``archive.provides`` is relative to the dataset root; the subset mirrors the
+    full layout under its own root, so the member name is the file's path
+    relative to the archive's extraction target.
+
+    Parameters
+    ----------
+    archive : RemoteArchive
+        Archive to map the files onto.
+    full_name : str
+        Directory name of the full dataset the archive paths are under.
+    dataset_root : str | Path
+        Root of the subset tree being staged.
+    wanted : Iterable[Path]
+        Every file the filtered CSVs name, images and masks alike.
+
+    Returns
+    -------
+    dict[str, Path]
+        Member name to destination path, for the files this archive provides.
+    """
+    extract_rel = archive.extract_to.relative_to(full_name)
+    target_root = (Path(dataset_root) / extract_rel).resolve()
+    prefix = archive.provides.relative_to(extract_rel)
+    members: dict[str, Path] = {}
+    for path in wanted:
+        path = Path(path)
+        if not path.is_relative_to(target_root):
+            continue
+        rel = path.relative_to(target_root)
+        if prefix.parts and rel.parts[: len(prefix.parts)] != prefix.parts:
+            continue
+        members[str(rel)] = path
+    return members
+
+
+def _wanted_files(root: Path) -> list[Path]:
+    """Return every image and mask path the subset's filtered CSVs name."""
+    splits = build_flair_splits(root)
+    return [
+        Path(path) for pair in splits.values() for path in (*pair["IMG"], *pair["MSK"])
+    ]
+
+
+def subset_split_sizes(dataset: SubsetDataset, root: str | Path) -> dict[str, int]:
+    """Return the bytes each split's tiles and masks would take on disk.
+
+    Sizes come from the remote archives' central directories: only the archive
+    tables are read, never a member. It is what ``--report-only`` prints before
+    a spec is committed to disk.
+
+    Parameters
+    ----------
+    dataset : SubsetDataset
+        Subset whose archives hold the files.
+    root : str | Path
+        Subset root, holding the filtered CSVs.
+
+    Returns
+    -------
+    dict[str, int]
+        Bytes per split.
+
+    Raises
+    ------
+    ValueError
+        If a file named by the CSVs belongs to none of the archives.
+    """
+    root = Path(root)
+    splits = build_flair_splits(root)
+    wanted = [
+        Path(path) for pair in splits.values() for path in (*pair["IMG"], *pair["MSK"])
+    ]
+    sizes: dict[str, int] = {}
+    for archive in dataset.full.archives:
+        members = members_for_archive(archive, dataset.full.name, root, wanted)
+        if not members:
+            continue
+        infos = member_infos(archive.url, archive.size)
+        for member, dest in members.items():
+            if member not in infos:
+                raise ValueError(
+                    f"{archive_filename(archive.url)}: {member} is not in the archive."
+                )
+            sizes[str(dest)] = infos[member]
+    missing = [path for path in wanted if str(path) not in sizes]
+    if missing:
+        raise ValueError(
+            f"{len(missing)} subset file(s) belong to no archive, e.g. {missing[0]}."
+        )
+    return {
+        split: sum(sizes[str(Path(path))] for path in (*pair["IMG"], *pair["MSK"]))
+        for split, pair in splits.items()
+    }
+
+
+def ensure_subset_dataset(
+    dataset: SubsetDataset,
+    data_dir: str | Path = "data",
+    *,
+    force: bool = False,
+    report_only: bool = False,
+    workers: int = 8,
+) -> Path:
+    """Stage and verify a whole-domain subset, fetching only its tiles.
+
+    The official path CSVs are downloaded once into ``source_csvs/``, filtered
+    into ``CSVs/`` for ``dataset.spec``, and recorded in
+    ``subset_manifest.json``. The tiles the filtered CSVs name are then fetched
+    one member at a time out of the remote archives, so the full dataset never
+    touches the disk, and the tree is verified like any other FLAIR#1 dataset.
+    Members already present are skipped, which makes an interrupted staging run
+    resumable.
+
+    Parameters
+    ----------
+    dataset : SubsetDataset
+        Subset to stage.
+    data_dir : str | Path
+        Directory the subset is assembled under.
+    force : bool
+        Delete the subset root and stage it again.
+    report_only : bool
+        Stop after the filtered CSVs and log what each split would cost.
+    workers : int
+        Concurrent downloads per archive.
+
+    Returns
+    -------
+    Path
+        Root of the filtered, verified subset.
+
+    Raises
+    ------
+    ValueError
+        If ``root`` holds a subset staged with another spec, or if the staged
+        tree fails verification.
+    """
+    data_dir = Path(data_dir)
+    root = data_dir / dataset.name
+    if force:
+        shutil.rmtree(root, ignore_errors=True)
+    root.mkdir(parents=True, exist_ok=True)
+
+    manifest = read_manifest(root)
+    if manifest is not None and not manifest_matches(manifest, dataset.spec):
+        raise ValueError(
+            f"{root} holds a subset staged with spec {manifest.get('spec')}; "
+            f"requested {dataset.spec.as_text()}. Rebuild it with --force, or "
+            f"point --data-dir elsewhere."
+        )
+    if manifest is None:
+        _stage_csvs(dataset.full.csv_urls, root, subdir=_SOURCE_CSV_SUBDIR)
+        sources: dict[str, Path] = {}
+        for name in dataset.full.csv_urls:
+            source = root / _SOURCE_CSV_SUBDIR / name
+            split = split_of_csv(source)
+            if split is None:
+                raise ValueError(f"{source}: name does not end in a FLAIR split.")
+            sources[split] = source
+        selections = build_subset_csvs(sources, root, dataset.spec)
+        write_manifest(root, dataset.spec, selections)
+        manifest = read_manifest(root)
+    if manifest is None:  # pragma: no cover - write_manifest just wrote it
+        raise RuntimeError(f"{root}: subset manifest could not be written.")
+    for split, info in sorted(manifest["splits"].items()):
+        logger.info(
+            "{}: {} tiles over {}/{} domains kept",
+            split,
+            info["tiles"],
+            len(info["domains"]),
+            len(info["available"]),
+        )
+
+    if report_only:
+        sizes = subset_split_sizes(dataset, root)
+        for split, size in sizes.items():
+            logger.info("{}: {:.1f} MiB to fetch", split, size / 2**20)
+        logger.info(
+            "{}: {:.1f} MiB in total", dataset.name, sum(sizes.values()) / 2**20
+        )
+        return root
+
+    try:
+        report = verify_flair_dataset(root)
+    except (FileNotFoundError, ValueError):
+        pass
+    else:
+        logger.info("{} is already available ({}).", dataset.name, report.summary())
+        return root
+
+    wanted = _wanted_files(root)
+    fetched = 0
+    for archive in dataset.full.archives:
+        members = members_for_archive(archive, dataset.full.name, root, wanted)
+        if not members:
+            continue
+        logger.info(
+            "Fetching {} member(s) from {}",
+            len(members),
+            archive_filename(archive.url),
+        )
+        fetch_report = fetch_members(
+            archive.url, archive.size, members, workers=workers
+        )
+        logger.info("{}: {}", archive_filename(archive.url), fetch_report.summary())
+        fetched += fetch_report.bytes_downloaded
+
+    try:
+        report = verify_flair_dataset(root)
+    except (FileNotFoundError, ValueError) as error:
+        raise ValueError(
+            f"{dataset.name}: staging finished but verification failed ({error}). "
+            f"Rerun with --force to rebuild {root}."
+        ) from error
+
+    logger.info(
+        "Verified {} ({}, {:.1f} MiB fetched).",
+        dataset.name,
+        report.summary(),
+        fetched / 2**20,
+    )
+    return root
+
+
 def ensure_dataset(
     dataset: Dataset = TOY_DATASET,
     data_dir: str | Path = "data",
     *,
     force: bool = False,
     keep_zip: bool = False,
+    report_only: bool = False,
+    workers: int = 8,
 ) -> Path:
     """Make sure ``dataset`` is present, extracted and verified under data_dir.
 
@@ -513,24 +799,39 @@ def ensure_dataset(
     reused as is. Otherwise the archive is downloaded (or a complete local one
     reused) and extracted, the result is verified, and the archive is deleted
     unless ``keep_zip``. A bad toy tree is dropped and rebuilt; a bad full tree
-    is kept, since rebuilding it costs a full re-download.
+    is kept, since rebuilding it costs a full re-download. A
+    :class:`SubsetDataset` is delegated to :func:`ensure_subset_dataset`.
 
     Parameters
     ----------
-    dataset : RemoteDataset | FullDataset
+    dataset : Dataset
         Dataset to stage; defaults to the FLAIR#1 toy.
     data_dir : str | Path
         Directory the dataset is assembled under (the repo's ``data/``).
     force : bool
         Re-download even when a verified copy already exists.
     keep_zip : bool
-        Keep the archive(s) after a successful verify.
+        Keep the archive(s) after a successful verify; ignored by subsets,
+        which never stage a full archive.
+    report_only : bool
+        For a subset, stop after the filtered CSVs and report what it would
+        cost, without fetching any tile.
+    workers : int
+        Concurrent downloads for a subset.
 
     Returns
     -------
     Path
         Root of the extracted, verified dataset.
     """
+    if isinstance(dataset, SubsetDataset):
+        return ensure_subset_dataset(
+            dataset,
+            data_dir,
+            force=force,
+            report_only=report_only,
+            workers=workers,
+        )
     if isinstance(dataset, FullDataset):
         return ensure_full_dataset(dataset, data_dir, force=force, keep_zip=keep_zip)
 
@@ -601,14 +902,54 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Only verify an already-extracted dataset; never download.",
     )
+    parser.add_argument(
+        "--num-domains",
+        default=None,
+        metavar="TRAIN,VALIDATION,TEST",
+        help="Domains kept per split for --dataset flair_1_subset, "
+        "alphabetically first (default: 21,8,10).",
+    )
+    parser.add_argument(
+        "--report-only",
+        action="store_true",
+        help="For --dataset flair_1_subset: stage the filtered CSVs and report "
+        "what each split would cost, without fetching any tile.",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=8,
+        help="Concurrent downloads per archive for flair_1_subset "
+        "(default: %(default)s).",
+    )
     args = parser.parse_args(argv)
     dataset = DATASETS[args.dataset]
+
+    if args.num_domains is not None:
+        if not isinstance(dataset, SubsetDataset):
+            parser.error("--num-domains only applies to --dataset flair_1_subset.")
+        try:
+            dataset = replace(dataset, spec=SubsetSpec.from_text(args.num_domains))
+        except ValueError as error:
+            parser.error(str(error))
+    if args.report_only:
+        if not isinstance(dataset, SubsetDataset):
+            parser.error("--report-only only applies to --dataset flair_1_subset.")
+        if args.force or args.verify_only:
+            parser.error("--report-only cannot be combined with --force/--verify-only.")
 
     if args.verify_only:
         report = verify_flair_dataset(Path(args.data_dir) / dataset.name)
         logger.info(report.summary())
     else:
-        ensure_dataset(dataset, args.data_dir, force=args.force, keep_zip=args.keep_zip)
+        ensure_dataset(
+            dataset,
+            args.data_dir,
+            force=args.force,
+            keep_zip=args.keep_zip,
+            report_only=args.report_only,
+            workers=args.workers,
+        )
     return 0
 
 
