@@ -199,10 +199,10 @@ FULL_DATASET = FullDataset(
 
 Dataset = RemoteDataset | FullDataset | SubsetDataset
 
-# FLAIR#1 subset: the recipe that fits a 75 GiB staging budget, measured from the
-# remote central directories (58,912 tiles, 72.6 GiB). Domains are taken
-# alphabetically, so this selects the same tiles on every machine: the first 21
-# train domains, the first 8 validation and the first 10 test.
+# FLAIR#1 subset: the recipe that fits a 25 GiB staging budget, measured from the
+# remote central directories (11,075 tiles, 13.6 GiB). Domains are taken
+# alphabetically, so this selects the same tiles on every machine: the first 3
+# train domains, the first 2 validation and the first 2 test.
 SUBSET_DATASET = SubsetDataset(
     name=SUBSET_ROOT_NAME,
     full=FULL_DATASET,
@@ -962,7 +962,7 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         metavar="TRAIN,VALIDATION,TEST",
         help="Domains kept per split for --dataset flair_1_subset, "
-        "alphabetically first (default: 21,8,10).",
+        "alphabetically first (default: 3,2,2).",
     )
     parser.add_argument(
         "--report-only",

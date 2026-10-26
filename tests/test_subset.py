@@ -67,6 +67,9 @@ def test_kept_domains_by_collection_rejects_a_path_outside_the_root(
         kept_domains_by_collection([tmp_path / "D001/img/IMG_1.tif"], tmp_path / "sub")
 
 
+def test_subset_spec_defaults_fit_the_pando_budget() -> None:
+    assert SubsetSpec().as_dict() == {"train": 3, "validation": 2, "test": 2}
+
 
 def test_select_rows_keeps_the_alphabetically_first_domains() -> None:
     rows = [_row("D006_2020"), _row("D001_2020"), _row("D003_2021")]
