@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=rsss-unet-full-train
+#SBATCH --job-name=rsss-unet-subset-train
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
@@ -10,10 +10,12 @@
 #SBATCH --mail-user=mael.dacher.90@gmail.com
 #SBATCH --mail-type=END
 #
-# Full training run on PANDO: the U-Net baseline over the full FLAIR#1 dataset
-# (47,587 train / 14,125 val / 15,700 test tiles, 512x512, 5 bands) for 30
-# epochs, then an evaluation on the test split. It reports per-class IoU in the
-# log and writes the metrics and checkpoints under RUN_DIR.
+# U-Net baseline training run on PANDO over the FLAIR#1 subset: whole spatial
+# domains, alphabetically first per split (29,087 train / 14,125 val / 15,700
+# test tiles, 512x512, 5 bands, 72.6 GiB), for 30 epochs, then an evaluation on
+# the test split. It reports per-class IoU in the log and writes the metrics and
+# checkpoints under RUN_DIR. The subset exists because PANDO's quota cannot hold
+# the full tree (95 GiB extracted, ~146 GiB free at peak).
 #
 # PANDO runs RHEL 7.8 (glibc 2.17), driver 550.54.15 (CUDA 12.4) and Tesla V100
 # GPUs, so its commands select the `pando` dependency group: it is the only fork
@@ -23,15 +25,22 @@
 # the login node first:
 #
 #   uv sync --frozen --no-default-groups --no-dev --group pando
+#   # Size the subset first (CSVs only), then stage its tiles.
 #   SSL_CERT_FILE=/etc/pki/tls/certs/ca-bundle.crt \
 #       uv run --no-default-groups --group pando python -m rsss.data.download \
-#       --dataset flair_1_full --data-dir "$HOME/rsss-data"
+#       --dataset flair_1_subset --data-dir "$HOME/rsss-data" --report-only
+#   SSL_CERT_FILE=/etc/pki/tls/certs/ca-bundle.crt \
+#       uv run --no-default-groups --group pando python -m rsss.data.download \
+#       --dataset flair_1_subset --data-dir "$HOME/rsss-data"
 #   SSL_CERT_FILE=/etc/pki/tls/certs/ca-bundle.crt \
 #       uv run --no-default-groups --group pando python -m rsss.models.weights \
 #       --encoder resnet34
 #
-# The full dataset needs ~65 GiB extracted (~120 GiB free at peak), so point
-# DATA_DIR at a scratch filesystem rather than $HOME.
+# The subset fetches only the kept tiles, one member at a time out of IGN's
+# archives, so it needs 72.6 GiB of free space and no more at peak; point DATA_DIR
+# wherever that much is available. --num-domains TRAIN,VALIDATION,TEST changes
+# the recipe (default 21,8,10); the CSVs and the chosen domains are recorded in
+# $DATA_DIR/flair_1_subset_dataset/subset_manifest.json.
 #
 # Then, from the repository root:
 #   sbatch scripts/pando/job.sh
@@ -43,6 +52,8 @@
 #
 # Override the defaults with the environment:
 #   DATA_DIR=/scratch/me/data RUN_DIR=/scratch/me/runs EPOCHS=2 sbatch scripts/pando/job.sh
+# A full-dataset run, where the quota allows it, selects the full config:
+#   DATA_CONFIG=configs/data_full.yaml DATASET=flair_1_full sbatch scripts/pando/job.sh
 # A toy smoke run selects the toy config and caps the batches:
 #   DATA_CONFIG=configs/data.yaml DATASET=flair_1_toy EPOCHS=1 \
 #       LIMIT_TRAIN_BATCHES=2 sbatch scripts/pando/job.sh
@@ -52,14 +63,15 @@ set -euo pipefail
 REPO_ROOT="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 cd "$REPO_ROOT"
 
-# Data source: the full dataset by default, or configs/data.yaml for the toy.
-DATA_CONFIG="${DATA_CONFIG:-configs/data_full.yaml}"
-DATASET="${DATASET:-flair_1_full}"
+# Data source: the subset by default, or configs/data_full.yaml for the full set.
+DATA_CONFIG="${DATA_CONFIG:-configs/data_subset.yaml}"
+DATASET="${DATASET:-flair_1_subset}"
 case "$DATASET" in
     flair_1_toy) DATASET_DIR=flair_1_toy_dataset ;;
     flair_1_full) DATASET_DIR=flair_1_full_dataset ;;
+    flair_1_subset) DATASET_DIR=flair_1_subset_dataset ;;
     *)
-        echo "Unknown DATASET=$DATASET (expected flair_1_toy or flair_1_full)." >&2
+        echo "Unknown DATASET=$DATASET (expected flair_1_toy, flair_1_full or flair_1_subset)." >&2
         exit 1
         ;;
 esac

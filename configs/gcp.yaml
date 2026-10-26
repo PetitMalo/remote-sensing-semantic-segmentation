@@ -10,7 +10,7 @@
 #           families with:
 #             gcloud compute images list --project deeplearning-platform-release \
 #                 --filter="family~common-cu130"
-# boot_disk_size_gb : the extracted FLAIR#1 tree is ~65 GiB, with ~120 GiB
+# boot_disk_size_gb : the extracted FLAIR#1 tree is ~95 GiB, with ~146 GiB
 #                     needed at peak while the largest archive is extracted.
 # service_account : needs objectAdmin on the bucket; no key file is used.
 # max_run_duration : cost guard; the VM is deleted when it elapses.

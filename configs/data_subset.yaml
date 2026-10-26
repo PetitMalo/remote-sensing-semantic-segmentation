@@ -1,0 +1,16 @@
+# Data source for the subset run on PANDO, whose quota cannot hold the full
+# FLAIR#1 tree (95 GiB extracted, ~146 GiB free at peak).
+#
+# The subset keeps whole spatial domains, alphabetically first per split: the
+# 21 first train domains (29,087 tiles), all 8 validation domains (14,125) and
+# all 10 test domains (15,700) -- 58,912 tiles and 72.6 GiB, fetched tile by
+# tile from IGN's archives, so no archive is ever staged. It is staged with
+# `python -m rsss.data.download --dataset flair_1_subset` (add --report-only to
+# size it first, and --num-domains TRAIN,VALIDATION,TEST to change the recipe).
+#
+# data_dir : directory datasets are assembled under (the repo's `data/`).
+# dataset  : key into rsss.data.download.DATASETS.
+# download : fetch the missing tiles and split CSVs when missing.
+data_dir: data
+dataset: flair_1_subset
+download: true
