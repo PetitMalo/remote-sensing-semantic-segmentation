@@ -2,8 +2,8 @@
 
 A full FLAIR#1 tree is ~95 GiB, more than some cluster accounts hold, so the
 project stages a subset instead: entire spatial domains are kept, per split.
-Domains are ordered alphabetically, so ``SubsetSpec(train=21)`` always means the
-same 21 domains, on any machine and in any run — U-Net and DINO comparisons then
+Domains are ordered alphabetically, so ``SubsetSpec(train=3)`` always means the
+same 3 domains, on any machine and in any run — U-Net and DINO comparisons then
 score the identical tiles. :func:`build_subset_csvs` writes the filtered path
 CSVs and :func:`write_manifest` records the choice under the subset root.
 """
@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import csv
 import json
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -31,10 +31,11 @@ SPLIT_NAMES = ("train", "validation", "test")
 class SubsetSpec:
     """How many domains of each split a subset keeps.
 
-    The defaults are the recipe that fits a 75 GiB staging budget: the first 21
-    of the 32 train domains (29,087 tiles), all 8 validation domains (14,125) and
-    all 10 test domains (15,700), 58,912 tiles and ~72.6 GiB in total. A split
-    with fewer domains than its limit keeps all of them.
+    The defaults are the recipe that fits a 25 GiB staging budget: the first 3
+    of the 32 train domains (5,275 tiles), the first 2 of the 8 validation
+    domains (3,550) and the first 2 of the 10 test domains (2,250), 11,075 tiles
+    and 13.6 GiB in total. A split with fewer domains than its limit keeps all
+    of them.
 
     Parameters
     ----------
@@ -42,9 +43,9 @@ class SubsetSpec:
         Domains kept in each split, alphabetically first.
     """
 
-    train: int = 21
-    validation: int = 8
-    test: int = 10
+    train: int = 3
+    validation: int = 2
+    test: int = 2
 
     def __post_init__(self) -> None:
         for split in SPLIT_NAMES:
@@ -60,7 +61,7 @@ class SubsetSpec:
 
     @classmethod
     def from_text(cls, text: str) -> SubsetSpec:
-        """Parse ``TRAIN,VALIDATION,TEST`` domain counts, e.g. ``"21,8,10"``.
+        """Parse ``TRAIN,VALIDATION,TEST`` domain counts, e.g. ``"3,2,2"``.
 
         Parameters
         ----------
@@ -129,6 +130,44 @@ def domain_of(path: str | Path) -> str:
     if len(parts) < 4:
         raise ValueError(f"{path}: too few components to hold a domain.")
     return parts[-4]
+
+
+def kept_domains_by_collection(
+    paths: Iterable[str | Path], root: str | Path
+) -> dict[Path, set[str]]:
+    """Group the domains a set of tile paths names by their collection directory.
+
+    FLAIR#1 lays tiles out as ``<collection>/<domain>/<zone>/<kind>/<file>``, so
+    the collection is everything before the domain component. Reading the
+    collections off the paths keeps pruning (see
+    :func:`rsss.data.download.prune_out_of_spec_domains`) from hard-coding the
+    train and test layout differences.
+
+    Parameters
+    ----------
+    paths : Iterable[str | Path]
+        Tile paths, absolute or relative to ``root``.
+    root : str | Path
+        Directory the paths are relative to (the subset root).
+
+    Returns
+    -------
+    dict[Path, set[str]]
+        Collection directory, relative to ``root``, to the domains kept in it.
+
+    Raises
+    ------
+    ValueError
+        If a path is outside ``root`` or too short to hold a collection.
+    """
+    base = Path(root).resolve()
+    kept: dict[Path, set[str]] = {}
+    for path in paths:
+        relative = Path(path).resolve().relative_to(base)
+        if len(relative.parts) < 5:
+            raise ValueError(f"{path}: too few components to hold a collection.")
+        kept.setdefault(Path(*relative.parts[:-4]), set()).add(relative.parts[-4])
+    return kept
 
 
 def select_rows(rows: list[tuple[str, str]], limit: int) -> SplitSelection:

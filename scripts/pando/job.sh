@@ -11,11 +11,11 @@
 #SBATCH --mail-type=END
 #
 # U-Net baseline training run on PANDO over the FLAIR#1 subset: whole spatial
-# domains, alphabetically first per split (29,087 train / 14,125 val / 15,700
-# test tiles, 512x512, 5 bands, 72.6 GiB), for 30 epochs, then an evaluation on
-# the test split. It reports per-class IoU in the log and writes the metrics and
-# checkpoints under RUN_DIR. The subset exists because PANDO's quota cannot hold
-# the full tree (95 GiB extracted, ~146 GiB free at peak).
+# domains, alphabetically first per split (5,275 train / 3,550 val / 2,250 test
+# tiles, 512x512, 5 bands, 13.6 GiB), for 30 epochs, then an evaluation on the
+# test split. It reports per-class IoU in the log and writes the metrics and
+# checkpoints under RUN_DIR. The subset exists because PANDO's session cannot
+# hold the full tree (95 GiB extracted, ~146 GiB free at peak).
 #
 # PANDO runs RHEL 7.8 (glibc 2.17), driver 550.54.15 (CUDA 12.4) and Tesla V100
 # GPUs, so its commands select the `pando` dependency group: it is the only fork
@@ -25,6 +25,8 @@
 # the login node first:
 #
 #   uv sync --frozen --no-default-groups --no-dev --group pando
+#   # The wheel cache outgrows the session: drop it once the env is synced.
+#   uv cache clean
 #   # Size the subset first (CSVs only), then stage its tiles.
 #   SSL_CERT_FILE=/etc/pki/tls/certs/ca-bundle.crt \
 #       uv run --no-default-groups --group pando python -m rsss.data.download \
@@ -37,9 +39,11 @@
 #       --encoder resnet34
 #
 # The subset fetches only the kept tiles, one member at a time out of IGN's
-# archives, so it needs 72.6 GiB of free space and no more at peak; point DATA_DIR
+# archives, so it needs 13.6 GiB of free space and no more at peak; point DATA_DIR
 # wherever that much is available. --num-domains TRAIN,VALIDATION,TEST changes
-# the recipe (default 21,8,10); the CSVs and the chosen domains are recorded in
+# the recipe (default 3,2,2) and re-stages an existing tree to it in place --
+# domains dropped by the new recipe are pruned, kept tiles are reused. The CSVs
+# and the chosen domains are recorded in
 # $DATA_DIR/flair_1_subset_dataset/subset_manifest.json.
 #
 # Then, from the repository root:

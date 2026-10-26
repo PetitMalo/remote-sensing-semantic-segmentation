@@ -215,19 +215,85 @@ def test_ensure_subset_dataset_skips_tiles_already_staged(
     assert {path: path.stat().st_mtime_ns for path in root.rglob("*.tif")} == staged
 
 
-def test_ensure_subset_dataset_refuses_another_spec(
+def test_ensure_subset_dataset_narrows_the_spec_and_prunes_the_rest(
     fake_flair: FakeFlair, tmp_path: Path
 ) -> None:
-    ensure_subset_dataset(
+    wide = SubsetDataset(
+        name="fake_subset", full=fake_flair.full, spec=SubsetSpec(2, 1, 2)
+    )
+    root = ensure_subset_dataset(wide, tmp_path / "data")
+    staged = {path: path.stat().st_mtime_ns for path in root.rglob("*.tif")}
+
+    narrow = SubsetDataset(name="fake_subset", full=fake_flair.full, spec=_spec())
+    ensure_subset_dataset(narrow, tmp_path / "data")
+
+    # The domains outside the narrower spec are gone, whole.
+    assert not (root / "flair_aerial_train/D002").exists()
+    assert not (root / "data/flair_1_aerial_test/D011").exists()
+    # Every surviving tile is the one already staged: nothing was re-fetched.
+    survivors = {path: mtime for path, mtime in staged.items() if path.exists()}
+    assert survivors
+    assert {path: path.stat().st_mtime_ns for path in root.rglob("*.tif")} == survivors
+    manifest = read_manifest(root)
+    assert manifest is not None
+    assert manifest["spec"] == {"train": 1, "validation": 1, "test": 1}
+    assert (root / "CSVs/flair-1-paths-train.csv").is_file()
+    verify_flair_dataset(root)
+
+
+def test_ensure_subset_dataset_widens_the_spec_again(
+    fake_flair: FakeFlair, tmp_path: Path
+) -> None:
+    root = ensure_subset_dataset(
         SubsetDataset(name="fake_subset", full=fake_flair.full, spec=_spec()),
         tmp_path / "data",
     )
-    wider = SubsetDataset(
-        name="fake_subset", full=fake_flair.full, spec=SubsetSpec(2, 1, 1)
-    )
+    staged = {path: path.stat().st_mtime_ns for path in root.rglob("*.tif")}
 
-    with pytest.raises(ValueError, match="staged with spec"):
-        ensure_subset_dataset(wider, tmp_path / "data")
+    wide = SubsetDataset(
+        name="fake_subset", full=fake_flair.full, spec=SubsetSpec(2, 1, 2)
+    )
+    ensure_subset_dataset(wide, tmp_path / "data")
+
+    assert (root / "flair_aerial_train/D002").is_dir()
+    assert (root / "data/flair_1_aerial_test/D011").is_dir()
+    # Widening adds domains; it does not re-fetch the tiles already there.
+    current = {path: path.stat().st_mtime_ns for path in root.rglob("*.tif")}
+    assert {path: current[path] for path in staged} == staged
+    manifest = read_manifest(root)
+    assert manifest is not None
+    assert manifest["spec"] == {"train": 2, "validation": 1, "test": 2}
+    verify_flair_dataset(root)
+
+
+def test_ensure_subset_dataset_prunes_stray_domains_on_every_run(
+    fake_flair: FakeFlair, tmp_path: Path
+) -> None:
+    subset = SubsetDataset(name="fake_subset", full=fake_flair.full, spec=_spec())
+    root = ensure_subset_dataset(subset, tmp_path / "data")
+    stray = root / "flair_aerial_train/D099_2099/Z1/img"
+    stray.mkdir(parents=True)
+    (stray / "IMG_999999.tif").write_bytes(b"left behind")
+
+    ensure_subset_dataset(subset, tmp_path / "data")
+
+    assert not (root / "flair_aerial_train/D099_2099").exists()
+
+
+def test_report_only_leaves_the_staged_tree_untouched(
+    fake_flair: FakeFlair, tmp_path: Path
+) -> None:
+    subset = SubsetDataset(name="fake_subset", full=fake_flair.full, spec=_spec())
+    root = ensure_subset_dataset(subset, tmp_path / "data")
+    staged = {path: path.stat().st_mtime_ns for path in root.rglob("*.tif")}
+
+    wider = SubsetDataset(
+        name="fake_subset", full=fake_flair.full, spec=SubsetSpec(2, 1, 2)
+    )
+    ensure_subset_dataset(wider, tmp_path / "data", report_only=True)
+
+    assert {path: path.stat().st_mtime_ns for path in root.rglob("*.tif")} == staged
+    assert (root / "CSVs/flair-1-paths-train.csv").is_file()
 
 
 def test_report_only_sizes_the_subset_without_fetching_tiles(

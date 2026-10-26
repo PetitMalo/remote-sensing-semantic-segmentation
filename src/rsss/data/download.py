@@ -28,9 +28,11 @@ from loguru import logger
 from rsss.data.remote_zip import fetch_members, member_infos
 from rsss.data.splits import CSV_SUBDIR, build_flair_splits, split_of_csv
 from rsss.data.subset import (
+    SPLIT_NAMES,
     SUBSET_ROOT_NAME,
     SubsetSpec,
     build_subset_csvs,
+    kept_domains_by_collection,
     manifest_matches,
     read_manifest,
     write_manifest,
@@ -197,10 +199,10 @@ FULL_DATASET = FullDataset(
 
 Dataset = RemoteDataset | FullDataset | SubsetDataset
 
-# FLAIR#1 subset: the recipe that fits a 75 GiB staging budget, measured from the
-# remote central directories (58,912 tiles, 72.6 GiB). Domains are taken
-# alphabetically, so this selects the same tiles on every machine: the first 21
-# train domains, all 8 validation domains, all 10 test.
+# FLAIR#1 subset: the recipe that fits a 25 GiB staging budget, measured from the
+# remote central directories (11,075 tiles, 13.6 GiB). Domains are taken
+# alphabetically, so this selects the same tiles on every machine: the first 3
+# train domains, the first 2 validation and the first 2 test.
 SUBSET_DATASET = SubsetDataset(
     name=SUBSET_ROOT_NAME,
     full=FULL_DATASET,
@@ -603,6 +605,41 @@ def _wanted_files(root: Path) -> list[Path]:
     ]
 
 
+def prune_out_of_spec_domains(root: str | Path) -> list[Path]:
+    """Delete the domain directories the filtered CSVs no longer name.
+
+    Collections are read off the CSVs themselves (see
+    :func:`rsss.data.subset.kept_domains_by_collection`), so the train and test
+    layouts need no special case; every first-level directory under a collection
+    that holds no kept domain is removed whole. Staging runs it before fetching,
+    which is what lets a narrower spec reclaim its disk immediately, and again
+    on every call, so a run killed between filtering and pruning heals.
+
+    Parameters
+    ----------
+    root : str | Path
+        Subset root, holding the filtered CSVs and the staged tree.
+
+    Returns
+    -------
+    list[Path]
+        Removed directories, relative to ``root``.
+    """
+    root = Path(root)
+    removed: list[Path] = []
+    for collection, domains in sorted(
+        kept_domains_by_collection(_wanted_files(root), root).items()
+    ):
+        base = root / collection
+        if not base.is_dir():
+            continue
+        for child in sorted(base.iterdir()):
+            if child.is_dir() and child.name not in domains:
+                shutil.rmtree(child)
+                removed.append(child.relative_to(root))
+    return removed
+
+
 def subset_split_sizes(dataset: SubsetDataset, root: str | Path) -> dict[str, int]:
     """Return the bytes each split's tiles and masks would take on disk.
 
@@ -655,6 +692,11 @@ def subset_split_sizes(dataset: SubsetDataset, root: str | Path) -> dict[str, in
     }
 
 
+def _spec_text(counts: Mapping[str, int]) -> str:
+    """Render a manifest's per-split counts as ``TRAIN,VALIDATION,TEST``."""
+    return ",".join(str(counts[split]) for split in SPLIT_NAMES)
+
+
 def ensure_subset_dataset(
     dataset: SubsetDataset,
     data_dir: str | Path = "data",
@@ -673,6 +715,13 @@ def ensure_subset_dataset(
     Members already present are skipped, which makes an interrupted staging run
     resumable.
 
+    When ``root`` already holds a subset staged with another spec, the tree is
+    reconciled to the requested one instead of refusing: the CSVs are re-filtered
+    from the pristine ``source_csvs/``, the domains that fell out of the spec are
+    pruned, and only the newly kept domains are fetched. That is how a staging
+    budget is met after the fact — narrowing 21/8/10 to 3/2/2 keeps the tiles the
+    smaller spec already covers. ``force`` still means "wipe and rebuild".
+
     Parameters
     ----------
     dataset : SubsetDataset
@@ -682,7 +731,8 @@ def ensure_subset_dataset(
     force : bool
         Delete the subset root and stage it again.
     report_only : bool
-        Stop after the filtered CSVs and log what each split would cost.
+        Stop after the filtered CSVs and log what each split would cost; the
+        staged tree is left untouched, neither pruned nor fetched.
     workers : int
         Concurrent downloads per archive.
 
@@ -694,8 +744,7 @@ def ensure_subset_dataset(
     Raises
     ------
     ValueError
-        If ``root`` holds a subset staged with another spec, or if the staged
-        tree fails verification.
+        If the staged tree fails verification after staging.
     """
     data_dir = Path(data_dir)
     root = data_dir / dataset.name
@@ -705,11 +754,13 @@ def ensure_subset_dataset(
 
     manifest = read_manifest(root)
     if manifest is not None and not manifest_matches(manifest, dataset.spec):
-        raise ValueError(
-            f"{root} holds a subset staged with spec {manifest.get('spec')}; "
-            f"requested {dataset.spec.as_text()}. Rebuild it with --force, or "
-            f"point --data-dir elsewhere."
+        logger.warning(
+            "Re-staging {}: spec {} -> {}; the tree is reconciled to the new one.",
+            dataset.name,
+            _spec_text(manifest["spec"]),
+            dataset.spec.as_text(),
         )
+        manifest = None
     if manifest is None:
         _stage_csvs(dataset.full.csv_urls, root, subdir=_SOURCE_CSV_SUBDIR)
         sources: dict[str, Path] = {}
@@ -741,6 +792,10 @@ def ensure_subset_dataset(
             "{}: {:.1f} MiB in total", dataset.name, sum(sizes.values()) / 2**20
         )
         return root
+
+    pruned = prune_out_of_spec_domains(root)
+    if pruned:
+        logger.info("Pruned {} domain director(ies) outside the spec.", len(pruned))
 
     try:
         report = verify_flair_dataset(root)
@@ -907,13 +962,13 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         metavar="TRAIN,VALIDATION,TEST",
         help="Domains kept per split for --dataset flair_1_subset, "
-        "alphabetically first (default: 21,8,10).",
+        "alphabetically first (default: 3,2,2).",
     )
     parser.add_argument(
         "--report-only",
         action="store_true",
-        help="For --dataset flair_1_subset: stage the filtered CSVs and report "
-        "what each split would cost, without fetching any tile.",
+        help="For --dataset flair_1_subset: re-filter the CSVs and report what "
+        "each split would cost, without fetching or pruning any tile.",
     )
     parser.add_argument(
         "--workers",

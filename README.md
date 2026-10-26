@@ -53,15 +53,17 @@ uv run python -m rsss.data.download --dataset flair_1_toy --data-dir data
 # Full FLAIR#1: four archives plus the three split CSVs, 95 GiB extracted
 uv run python -m rsss.data.download --dataset flair_1_full --data-dir data
 
-# Subset: the alphabetically first 21 train, 8 validation and 10 test domains
-# (29,087 / 14,125 / 15,700 tiles, 72.6 GiB), fetched tile by tile -- no archive
+# Subset: the alphabetically first 3 train, 2 validation and 2 test domains
+# (5,275 / 3,550 / 2,250 tiles, 13.6 GiB), fetched tile by tile -- no archive
 # is ever staged, so peak disk equals the final tree.
 uv run python -m rsss.data.download --dataset flair_1_subset --data-dir data \
     --report-only   # size it first, without fetching any tile
 uv run python -m rsss.data.download --dataset flair_1_subset --data-dir data
-# Change the recipe (domains per split, alphabetically first):
+# Change the recipe (domains per split, alphabetically first). The staged tree is
+# reconciled in place: dropped domains are pruned, kept tiles are reused, only
+# the domains the new recipe adds are fetched. No --force needed.
 uv run python -m rsss.data.download --dataset flair_1_subset --data-dir data \
-    --num-domains 10,4,5
+    --num-domains 5,4,10
 
 # Check an already-staged tree without downloading
 uv run python -m rsss.data.download --dataset flair_1_subset --data-dir data \
@@ -72,9 +74,10 @@ The full dataset needs roughly 146 GiB free at peak: the largest archive is
 51 GiB and is extracted before it is deleted. Stage it on a scratch filesystem
 on the cluster. An interrupted staging run resumes, skipping archives already
 extracted; pass `--force` to rebuild a tree that fails verification. The subset
-needs only its final 72.6 GiB, and records the domains it kept in
-`<data-dir>/flair_1_subset_dataset/subset_manifest.json`; `--force` is what
-rebuilds it with another `--num-domains` recipe.
+needs only its final 13.6 GiB, and records the domains it kept in
+`<data-dir>/flair_1_subset_dataset/subset_manifest.json`; changing
+`--num-domains` reconciles the tree to the new recipe in place (see above), and
+`--force` is what throws it away and starts over.
 
 ## Train
 
@@ -153,9 +156,11 @@ uv sync --frozen --no-default-groups --no-dev --group pando
 # bundle; without it the download stops at "CERTIFICATE_VERIFY_FAILED:
 # self-signed certificate in certificate chain". If that CA lives outside the
 # bundle, point the variable at the .pem the IT service provides instead.
-# The subset is 72.6 GiB and is fetched tile by tile; --report-only only reads
+# The subset is 13.6 GiB and is fetched tile by tile; --report-only only reads
 # the split CSVs and the remote archive tables, so run it first to check the
-# numbers against the quota.
+# numbers against the quota. The uv wheel cache (~6 GiB here) competes for the
+# same session: `uv cache clean` after the sync frees it until the next
+# dependency change.
 SSL_CERT_FILE=/etc/pki/tls/certs/ca-bundle.crt \
     uv run --no-default-groups --group pando python -m rsss.data.download \
     --dataset flair_1_subset --data-dir "$HOME/rsss-data" --report-only
@@ -175,9 +180,9 @@ DATA_DIR=$HOME/rsss-data RUN_DIR=$HOME/rsss-runs/unet-subset-01 \
 ```
 
 `scripts/pando/job.sh` runs the U-Net baseline for 30 epochs over the FLAIR#1
-subset by default (whole domains: 29,087 train, 14,125 val, 15,700 test tiles),
-then evaluates on the test split. The full dataset stays reachable with
-`DATA_CONFIG=configs/data_full.yaml DATASET=flair_1_full`, where the quota
+subset by default (whole domains: 5,275 train, 3,550 val, 2,250 test tiles,
+13.6 GiB), then evaluates on the test split. The full dataset stays reachable
+with `DATA_CONFIG=configs/data_full.yaml DATASET=flair_1_full`, where the quota
 allows its ~146 GiB peak. It allocates 24
 hours; if the run hits the walltime, submit it again with the same `RUN_DIR` and
 `RESUME=last` to continue to epoch 30. It fails early if either the dataset or
