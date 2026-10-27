@@ -1,10 +1,11 @@
-"""Fetch and cache an encoder's pretrained weights for offline nodes.
+"""Fetch and cache a model's pretrained weights for offline nodes.
 
 Building a model with ``encoder_weights`` makes ``smp`` download the weights
 from the Hugging Face Hub into the local cache the first time; a compute node
-without outbound network cannot do that. This module performs just the fetch,
-so a batch script can stage the weights on a login node and the job can then
-build the model from the same cache.
+without outbound network cannot do that. The same holds for timm, which the
+DINOv3 backbone downloads through. This module performs just the fetch, so a
+batch script can stage the weights on a login node and the job can then build
+the model from the same cache.
 
 Run it with ``uv run python -m rsss.models.weights`` (``-h`` for the options).
 """
@@ -13,8 +14,11 @@ from __future__ import annotations
 
 import argparse
 
+import timm
 from loguru import logger
 from segmentation_models_pytorch.encoders import get_encoder
+
+from rsss.models.dinov3 import DEFAULT_MODEL as DEFAULT_DINOV3
 
 DEFAULT_ENCODER = "resnet34"
 DEFAULT_WEIGHTS = "imagenet"
@@ -53,8 +57,29 @@ def prefetch_encoder_weights(
     logger.info("Cached the {} {} weights.", encoder_name, weights)
 
 
+def prefetch_dinov3_weights(model_name: str = DEFAULT_DINOV3) -> None:
+    """Download timm's ``model_name`` backbone into the local cache.
+
+    Building the backbone is what makes timm resolve its checkpoint and cache
+    it, so it is built once and discarded. It is built on three input channels,
+    the pretrained shape: the segmentation model widens the stem itself.
+
+    Parameters
+    ----------
+    model_name : str
+        timm name of a DINOv3 backbone, e.g. the SAT-493M ViT-L/16.
+
+    Raises
+    ------
+    RuntimeError
+        If timm knows no such model, or it has no pretrained weights.
+    """
+    timm.create_model(model_name, pretrained=True, num_classes=0, in_chans=3)
+    logger.info("Cached the {} backbone.", model_name)
+
+
 def main(argv: list[str] | None = None) -> int:
-    """Fetch the requested encoder weights into the local cache."""
+    """Fetch the requested model's pretrained weights into the local cache."""
     parser = argparse.ArgumentParser(description=main.__doc__)
     parser.add_argument(
         "--encoder",
@@ -66,8 +91,22 @@ def main(argv: list[str] | None = None) -> int:
         default=DEFAULT_WEIGHTS,
         help="Weight set to fetch (default: %(default)s).",
     )
+    parser.add_argument(
+        "--dinov3",
+        nargs="?",
+        const=DEFAULT_DINOV3,
+        default=None,
+        metavar="MODEL",
+        help=(
+            "fetch a timm DINOv3 backbone instead of an smp encoder; bare, it "
+            f"fetches the satellite ViT (default: {DEFAULT_DINOV3})."
+        ),
+    )
     args = parser.parse_args(argv)
-    prefetch_encoder_weights(args.encoder, weights=args.weights)
+    if args.dinov3 is not None:
+        prefetch_dinov3_weights(args.dinov3)
+    else:
+        prefetch_encoder_weights(args.encoder, weights=args.weights)
     return 0
 
 
