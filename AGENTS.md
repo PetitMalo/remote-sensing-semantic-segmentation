@@ -18,7 +18,9 @@ Current scope: land cover (couverture) only, one small area first.
   driver, V100 GPUs). A package whose version differs between the two targets
   goes in both groups, never in `[project.dependencies]`, which applies to
   every fork. `tests/test_lock_platform.py` guards the PANDO side
-- TODO: DINO version (DINOv2 or DINOv3), to decide before the model code
+- DINO backbone: DINOv3 ViT-L/16 distilled on SAT-493M, through timm (the
+  reference repo needs torch >= 2.7.1, PANDO caps at 2.6). Frozen probe first,
+  with a 1x1 convolutional head; `configs/train_dinov3.yaml` is the recipe
 
 ## Commands
 - Install: `uv sync`
@@ -41,11 +43,14 @@ target now; GCP comes later, once these runs have proved the pipeline.
    node (compute nodes have no internet). Every command there selects the
    `pando` group, since the default stack needs glibc 2.28:
    `uv sync --frozen --no-default-groups --no-dev --group pando`, then stage the
-   dataset with
-   `uv run --no-default-groups --group pando python -m rsss.data.download --data-dir <root>`.
+   dataset and the pretrained weights with
+   `uv run --no-default-groups --group pando python -m rsss.data.download --data-dir <root>`
+   and `uv run --no-default-groups --group pando python -m rsss.models.weights`
+   (`--encoder resnet34` for the U-Net, `--dinov3` for the probe).
 2. Submit a run from the repository root: `sbatch scripts/pando/job.sh`. It
-   takes the dataset root, run directory and epoch count from `DATA_DIR`,
-   `RUN_DIR` and `EPOCHS`, and writes logs and checkpoints outside the repo.
+   takes the dataset root, run directory, recipe and epoch count from
+   `DATA_DIR`, `RUN_DIR`, `TRAIN_CONFIG` and `EPOCHS`, and writes logs and
+   checkpoints outside the repo.
 3. Read the results in `logs/slurm-<jobid>.out` and the run directory.
 See the `pando-gpu` skill for the batch-script conventions. Never launch jobs
 yourself: give me the `sbatch` (or `gcloud`) command instead.

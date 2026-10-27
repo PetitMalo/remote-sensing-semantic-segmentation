@@ -99,6 +99,22 @@ uv run python -m rsss.train --data-config configs/data_full.yaml \
     --max-epochs 30 --resume
 ```
 
+`configs/train_dinov3.yaml` is the comparison arm. It swaps the U-Net for
+timm's DINOv3 ViT-L/16 distilled on SAT-493M, frozen, with the paper's linear
+probe as head: a 1x1 convolution on the last block's patch map, upsampled 16x.
+Only the head (1.3 M parameters) and the patch-embedding stem train, so the run
+measures what the pretrained features already contain; `train_stem: true` is
+what lets the zero-initialized NIR/nDSM filters learn, at 1e-4 rather than the
+head's 1e-3. The recipe also swaps in SAT-493M's RGB normalization (NIR and
+nDSM keep FLAIR's), and asks for 10 epochs at batch 8. Select it with
+`--config`:
+
+```bash
+uv run python -m rsss.train --config configs/train_dinov3.yaml \
+    --data-config configs/data_subset.yaml --data-dir data \
+    --output-dir outputs/dinov3-probe-01
+```
+
 Logs and checkpoints land under `--output-dir` (default `outputs/`). A run keeps
 only two checkpoints, `last.ckpt` and the one with the best validation mIoU, so
 its directory does not grow with the epoch count. It ends by scoring the test
@@ -168,15 +184,25 @@ SSL_CERT_FILE=/etc/pki/tls/certs/ca-bundle.crt \
     uv run --no-default-groups --group pando python -m rsss.data.download \
     --dataset flair_1_subset --data-dir "$HOME/rsss-data"
 
-# Stage the encoder weights the model build fetches from the Hugging Face Hub,
-# into the same cache the compute node reads ($HOME/.cache/huggingface).
+# Stage the pretrained weights the model build fetches from the Hugging Face
+# Hub, into the same cache the compute node reads ($HOME/.cache/huggingface).
+# The U-Net reads smp's ImageNet encoder; the DINOv3 recipe reads timm's
+# SAT-493M ViT-L/16 instead (~1.2 GB). Stage whichever one you train.
 SSL_CERT_FILE=/etc/pki/tls/certs/ca-bundle.crt \
     uv run --no-default-groups --group pando python -m rsss.models.weights \
     --encoder resnet34
+SSL_CERT_FILE=/etc/pki/tls/certs/ca-bundle.crt \
+    uv run --no-default-groups --group pando python -m rsss.models.weights \
+    --dinov3
 
 # Then, from the repository root.
 DATA_DIR=$HOME/rsss-data RUN_DIR=$HOME/rsss-runs/unet-subset-01 \
     sbatch scripts/pando/job.sh
+
+# The DINOv3 linear probe instead: TRAIN_CONFIG selects the recipe, and the
+# job follows it for the cache check and the default run directory.
+DATA_DIR=$HOME/rsss-data RUN_DIR=$HOME/rsss-runs/dinov3-probe-01 \
+    TRAIN_CONFIG=configs/train_dinov3.yaml sbatch scripts/pando/job.sh
 ```
 
 `scripts/pando/job.sh` runs the U-Net baseline for 30 epochs over the FLAIR#1
@@ -186,9 +212,10 @@ with `DATA_CONFIG=configs/data_full.yaml DATASET=flair_1_full`, where the quota
 allows its ~146 GiB peak. It allocates 24
 hours; if the run hits the walltime, submit it again with the same `RUN_DIR` and
 `RESUME=last` to continue to epoch 30. It fails early if either the dataset or
-the encoder weights were not staged. The log lands in `logs/slurm-<jobid>.out`
+the pretrained weights were not staged. The log lands in `logs/slurm-<jobid>.out`
 and the checkpoints, CSV metrics and per-class IoU under `RUN_DIR`. Override
-`DATA_DIR`, `RUN_DIR`, `EPOCHS`, `ENCODER` or `RESUME` to change that:
+`DATA_DIR`, `RUN_DIR`, `TRAIN_CONFIG`, `EPOCHS`, `ENCODER`, `DINOV3_MODEL` or
+`RESUME` to change that; `EPOCHS` defaults to the recipe's own `max_epochs`:
 
 ```bash
 DATA_DIR=/scratch/me/rsss-data RUN_DIR=/scratch/me/runs/run-01 EPOCHS=2 \
