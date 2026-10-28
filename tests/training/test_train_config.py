@@ -15,6 +15,7 @@ from rsss.training.config import load_train_config
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SHIPPED_CONFIG = REPO_ROOT / "configs" / "train.yaml"
+SHIPPED_DINOV3_CONFIG = REPO_ROOT / "configs" / "train_dinov3.yaml"
 
 MINIMAL: dict = {"model": {"name": "unet", "encoder_weights": None}, "num_classes": 3}
 
@@ -74,6 +75,20 @@ def test_the_shipped_config_loads():
     assert config.model["name"] == "unet"
     assert config.model["in_channels"] == 5
     # FLAIR#1's official per-band normalization, over the raw 0..255 values.
+    assert config.datamodule["norm_type"] == "custom"
+    assert len(config.datamodule["means"]) == 5
+    assert len(config.datamodule["stds"]) == 5
+
+
+def test_the_shipped_dinov3_config_loads():
+    config = load_train_config(SHIPPED_DINOV3_CONFIG)
+
+    assert config.num_classes == 13
+    assert config.model["name"] == "dinov3_linear_probe"
+    assert config.model["freeze_backbone"] is True
+    assert config.model["train_stem"] is True
+    assert config.optimizer is not None
+    assert config.optimizer["stem_lr"] < config.optimizer["lr"]
     assert config.datamodule["norm_type"] == "custom"
     assert len(config.datamodule["means"]) == 5
     assert len(config.datamodule["stds"]) == 5

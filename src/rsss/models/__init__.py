@@ -1,6 +1,6 @@
 """Model registry.
 
-Configs name a model (``"unet"`` today, ``"dino_unet"`` later) instead of
+Configs name a model (``"unet"``, ``"dinov3_linear_probe"``) instead of
 importing a class, so every architecture is reachable from the same config
 schema and the shared training module never changes when one is added.
 """
@@ -74,4 +74,4 @@ def build_model(cfg: Mapping[str, Any]) -> nn.Module:
 
 # Imported last: the builders register themselves at import time, and they
 # import ``register_model`` back from this partially initialised module.
-from rsss.models import unet  # noqa: F401
+from rsss.models import dinov3, unet  # noqa: F401

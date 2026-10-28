@@ -9,6 +9,7 @@ plumbing end to end.
 from __future__ import annotations
 
 import math
+from collections.abc import Iterator
 from typing import Any, cast
 
 import pytest
@@ -29,6 +30,7 @@ from torch.optim.lr_scheduler import (
 )
 from torch.utils.data import DataLoader, Dataset
 
+from rsss.models import MODEL_REGISTRY, register_model
 from rsss.training.module import (
     SegmentationModule,
     _format_per_class,
@@ -93,6 +95,49 @@ class _SyntheticSegData(Dataset):
 
     def __getitem__(self, index: int) -> dict[str, Tensor]:
         return {"img": self.img[index], "msk": self.msk[index]}
+
+
+class _GroupedNet(nn.Module):
+    """A network that labels its parts, the way the DINOv3 probe does."""
+
+    def __init__(self, classes: int = NUM_CLASSES) -> None:
+        super().__init__()
+        self.stem = nn.Conv2d(IN_CHANNELS, 8, kernel_size=3, padding=1)
+        self.frozen = nn.Linear(8, 8)
+        self.head = nn.Conv2d(8, classes, kernel_size=1)
+        self.frozen.requires_grad_(False)
+
+    def forward(self, x: Tensor) -> Tensor:  # ty: ignore[invalid-mutable-override]
+        return self.head(self.stem(x))
+
+    def parameter_groups(self) -> dict[str, list[nn.Parameter]]:
+        return {
+            "stem": list(self.stem.parameters()),
+            "backbone": list(self.frozen.parameters()),
+            "head": list(self.head.parameters()),
+        }
+
+
+@pytest.fixture
+def grouped_model() -> Iterator[str]:
+    """Register ``_GroupedNet`` for one test, then take it back out."""
+    name = "test-grouped-model"
+    register_model(name)(_GroupedNet)
+    try:
+        yield name
+    finally:
+        MODEL_REGISTRY.pop(name)
+
+
+def grouped_module(name: str, **overrides: Any) -> SegmentationModule:
+    """Return a module around the grouped network, with its grouped rates."""
+    kwargs: dict[str, Any] = {
+        "model": {"name": name},
+        "optimizer": {"lr": 1e-3, "stem_lr": 1e-4},
+        "scheduler": {"warmup_epochs": 0, "t_max": 4},
+    }
+    kwargs.update(overrides)
+    return make_module(**kwargs)
 
 
 # --------------------------------------------------------------------------- #
@@ -275,6 +320,70 @@ def test_configure_optimizers_returns_adamw_and_an_epoch_schedule():
     assert optimizer.param_groups[0]["lr"] == 1e-3
     assert optimizer.param_groups[0]["weight_decay"] == 1e-2
     assert schedule["interval"] == "epoch"
+
+
+def test_a_model_that_labels_its_groups_gets_one_rate_per_group(grouped_model):
+    optimizer = configured(grouped_module(grouped_model))["optimizer"]
+
+    # "backbone" is entirely frozen, so only the stem and the head are left.
+    assert [group["lr"] for group in optimizer.param_groups] == [1e-4, 1e-3]
+
+
+def test_a_group_without_its_own_rate_keeps_the_base_rate(grouped_model):
+    module = grouped_module(grouped_model, optimizer={"lr": 1e-3})
+
+    optimizer = configured(module)["optimizer"]
+
+    assert [group["lr"] for group in optimizer.param_groups] == [1e-3, 1e-3]
+
+
+def test_frozen_parameters_stay_out_of_the_optimizer(grouped_model):
+    module = grouped_module(grouped_model)
+
+    optimizer = configured(module)["optimizer"]
+
+    scheduled = {
+        id(parameter)
+        for group in optimizer.param_groups
+        for parameter in group["params"]
+    }
+    frozen = {id(parameter) for parameter in cast(Any, module.net).frozen.parameters()}
+    assert frozen.isdisjoint(scheduled)
+
+
+def test_every_trainable_parameter_is_in_exactly_one_group(grouped_model):
+    module = grouped_module(grouped_model)
+
+    optimizer = configured(module)["optimizer"]
+
+    scheduled = [
+        id(parameter)
+        for group in optimizer.param_groups
+        for parameter in group["params"]
+    ]
+    assert len(scheduled) == len(set(scheduled))
+    trainable = {id(p) for p in module.parameters() if p.requires_grad}
+    assert set(scheduled) == trainable
+
+
+def test_a_model_without_groups_keeps_a_single_parameter_group():
+    optimizer = configured(make_module())["optimizer"]
+
+    assert len(optimizer.param_groups) == 1
+
+
+def test_the_schedule_scales_every_group_proportionally(grouped_model):
+    module = grouped_module(
+        grouped_model,
+        optimizer={"lr": 1.0, "stem_lr": 0.1},
+        scheduler={"warmup_epochs": 1, "t_max": 10},
+    )
+
+    optimizer = configured(module)["optimizer"]
+
+    assert [group["lr"] for group in optimizer.param_groups] == pytest.approx(
+        [0.01, 0.1]
+    )
 
 
 def test_scheduler_matches_the_number_of_epochs():

@@ -1,0 +1,64 @@
+# Training recipe for DINOv3's linear segmentation probe.
+#
+# model       : forwarded to rsss.models.build_model ("name" plus its kwargs).
+#               The backbone is timm's ViT-L/16 distilled on SAT-493M, read at
+#               its native 512x512; the head is a 1x1 convolution on the last
+#               block's patch map, upsampled 16x (the DINOv3 paper's linear
+#               probe). Only the head and the patch-embedding stem train, so
+#               this measures the pretrained features themselves.
+# num_classes : classes shared by the model head and the metrics (FLAIR = 13).
+# loss        : weights of the cross-entropy and Dice terms.
+# optimizer   : AdamW settings. `lr` is the fresh 1x1 head's rate; `stem_lr` the
+#               patch-embedding convolution's, whose pretrained RGB filters
+#               should move an order of magnitude slower. It also owns the
+#               zero-initialized NIR/nDSM filters, which is why train_stem must
+#               stay true for those two bands to be used at all.
+# scheduler   : warmup-then-cosine; `t_max` defaults to `trainer.max_epochs`.
+# trainer     : Lightning Trainer settings.
+# datamodule  : FlairDatamodule settings; the data source itself lives in
+#               configs/data.yaml (data_dir here would be rejected).
+model:
+  name: dinov3_linear_probe
+  model_name: vit_large_patch16_dinov3.sat493m
+  pretrained: true
+  in_channels: 5
+  freeze_backbone: true
+  # Keep the 5-band input: unfreezes patch_embed.proj only, so the zero-initial
+  # NIR/nDSM filters can learn. Without it those bands are silently ignored.
+  train_stem: true
+
+num_classes: 13
+
+loss:
+  ce: 0.5
+  dice: 0.5
+
+optimizer:
+  lr: 1.0e-3
+  stem_lr: 1.0e-4
+  weight_decay: 1.0e-4
+
+scheduler:
+  warmup_epochs: 1
+
+trainer:
+  # A linear probe converges in a few epochs; the frozen backbone costs no
+  # backward pass, so an epoch is a couple of minutes on one V100.
+  max_epochs: 10
+  accelerator: auto
+  devices: 1
+  precision: 16-mixed
+  log_every_n_steps: 10
+
+datamodule:
+  # The ViT runs forward only, at 512x512 with 1024 tokens: batch 8 fits the
+  # 32 GB V100 comfortably. Lower it if a run reports CUDA out of memory.
+  batch_size: 8
+  num_workers: 8
+  # DINOv3's SAT-493M statistics, in [0, 1] units and multiplied by 255 for the
+  # raw uint8 rasters: mean (0.430, 0.411, 0.296), std (0.213, 0.156, 0.143).
+  # SAT-493M is RGB-only, so NIR and nDSM keep FLAIR#1's official statistics --
+  # the stem standardizes on its own means, not on the backbone's.
+  norm_type: custom
+  means: [109.65, 104.805, 75.48, 106.38, 53.26]
+  stds: [54.315, 39.78, 36.465, 39.69, 79.3]

@@ -85,7 +85,10 @@ class SegmentationModule(LightningModule):
         Cross-entropy is unweighted unless ``class_weights`` is given; the Dice
         term never ignores a class.
     optimizer : Mapping[str, Any], optional
-        ``{"lr": ..., "weight_decay": ...}`` for AdamW.
+        ``{"lr": ..., "weight_decay": ...}`` for AdamW. A ``"<group>_lr"`` key
+        sets the rate of one parameter group a model exposes through its
+        ``parameter_groups()`` method, e.g. ``"stem_lr"``; groups without one
+        keep ``"lr"``.
     scheduler : Mapping[str, Any], optional
         ``{"warmup_epochs": ..., "t_max": ...}``. ``t_max`` defaults to the
         Trainer's ``max_epochs``, so the cosine horizon follows the run.
@@ -309,10 +312,53 @@ class SegmentationModule(LightningModule):
             optimizer, schedulers=[warmup_schedule, cosine], milestones=[warmup]
         )
 
+    def _param_groups(self) -> list[dict[str, Any]]:
+        """Return the AdamW parameter groups of the network.
+
+        A model may partition its parameters with a ``parameter_groups()``
+        method, mapping a name to the parameters it covers, so that a part
+        which needs its own rate (a pretrained stem, say) does not have to
+        follow the head's. Each group's rate is ``optimizer.<name>_lr`` when
+        set, and ``optimizer.lr`` otherwise. Frozen parameters are left out:
+        AdamW would skip them anyway, but an empty group is not a group.
+
+        Raises
+        ------
+        ValueError
+            If the model leaves no trainable parameter.
+        """
+        grouper = getattr(self.net, "parameter_groups", None)
+        groups: list[dict[str, Any]] = []
+        if grouper is None:
+            groups = [
+                {
+                    "params": [
+                        parameter
+                        for parameter in self.parameters()
+                        if parameter.requires_grad
+                    ]
+                }
+            ]
+        else:
+            for name, parameters in grouper().items():
+                trainable = [p for p in parameters if p.requires_grad]
+                if not trainable:
+                    continue
+                group: dict[str, Any] = {"params": trainable}
+                rate = self.optimizer_cfg.get(f"{name}_lr")
+                if rate is not None:
+                    group["lr"] = float(rate)
+                groups.append(group)
+        if not any(group["params"] for group in groups):
+            raise ValueError(
+                "No trainable parameter left: the model is entirely frozen."
+            )
+        return groups
+
     def configure_optimizers(self) -> OptimizerLRScheduler:
-        """AdamW on the whole network, with a warmup-then-cosine schedule."""
+        """AdamW over the parameter groups, warmup-then-cosine over the run."""
         optimizer = AdamW(
-            self.parameters(),
+            self._param_groups(),
             lr=float(self.optimizer_cfg.get("lr", 3e-4)),
             weight_decay=float(self.optimizer_cfg.get("weight_decay", 1e-4)),
         )
