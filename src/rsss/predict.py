@@ -10,6 +10,10 @@ default local environment has it, the trimmed ``pando`` stack used on the
 cluster does not. It is imported lazily so the rest of the module loads either
 way -- the visualisation itself is meant to run locally, on exported results.
 
+The data source defaults to the toy config ``configs/data.yaml``; pass
+``--data-config`` with the config the run was trained with (the subset or the
+full dataset), or the plots describe the wrong test split.
+
 Run it with ``uv run python -m rsss.predict`` (``-h`` for the options).
 """
 
@@ -304,7 +308,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--data-config",
         default=DEFAULT_DATA_CONFIG,
-        help="Data source (default: %(default)s).",
+        help="Data source the run was trained with (default: %(default)s, the "
+        "toy dataset).",
     )
     parser.add_argument(
         "--data-dir",

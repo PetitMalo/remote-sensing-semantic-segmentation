@@ -159,10 +159,11 @@ RUN=unet-4022046
 rclone copy "scw:rsss-bucket/runs/$RUN/" "outputs/pando/$RUN/" --progress
 
 uv run python -m rsss.predict \
-    --checkpoint "outputs/pando/$RUN/checkpoints/last.ckpt" \
-    --metrics    "outputs/pando/$RUN/csv" \
-    --data-dir   data \
-    --output-dir "outputs/pando/$RUN/figures"
+    --checkpoint  "outputs/pando/$RUN/checkpoints/last.ckpt" \
+    --metrics     "outputs/pando/$RUN/csv" \
+    --data-config configs/data_subset.yaml \
+    --data-dir    data \
+    --output-dir  "outputs/pando/$RUN/figures"
 ```
 
 `predictions.png` shows a few test tiles as image / ground truth / prediction,
@@ -356,8 +357,9 @@ stop paying for the boot disk. `configs/gcp.yaml` also caps the run with
 ```bash
 scripts/gcp/pull_run.sh unet-gcp-01
 uv run python -m rsss.predict \
-    --checkpoint outputs/gcp/unet-gcp-01/checkpoints/last.ckpt \
-    --metrics    outputs/gcp/unet-gcp-01/csv \
-    --data-dir   data \
-    --output-dir outputs/gcp/unet-gcp-01/figures
+    --checkpoint  outputs/gcp/unet-gcp-01/checkpoints/last.ckpt \
+    --metrics     outputs/gcp/unet-gcp-01/csv \
+    --data-config configs/data_full.yaml \
+    --data-dir    data \
+    --output-dir  outputs/gcp/unet-gcp-01/figures
 ```
