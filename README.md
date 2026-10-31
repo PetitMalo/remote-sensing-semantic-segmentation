@@ -115,6 +115,24 @@ uv run python -m rsss.train --config configs/train_dinov3.yaml \
     --output-dir outputs/dinov3-probe-01
 ```
 
+Two fine-tuned arms sit between that probe and training the whole backbone,
+differing only in which parameters move. `configs/train_dinov3_bitfit.yaml`
+adds every bias, every LayerNorm affine pair and every LayerScale vector
+(0.3 M parameters) but no token-mixing weight. `configs/train_dinov3_last_blocks.yaml`
+instead trains the last four blocks whole — attention, MLP, norms and scales,
+51.7 M parameters — plus the trunk's final LayerNorm, at 1e-4 (`blocks_lr`)
+against the head's 1e-3, and asks for 20 epochs rather than 10, since that many
+weights at a tenth of the rate need longer to settle. That longer budget is the
+one knob it does not share with the probe, so its mIoU is indicative rather than
+a like-for-like comparison; a control at 10 epochs is the same command with
+`--max-epochs 10`:
+
+```bash
+uv run python -m rsss.train --config configs/train_dinov3_last_blocks.yaml \
+    --data-config configs/data_subset.yaml --data-dir data \
+    --output-dir outputs/dinov3-last-blocks-01
+```
+
 Logs and checkpoints land under `--output-dir` (default `outputs/`). A run keeps
 only two checkpoints, `last.ckpt` and the one with the best validation mIoU, so
 its directory does not grow with the epoch count. It ends by scoring the test
@@ -203,6 +221,10 @@ DATA_DIR=$HOME/rsss-data RUN_DIR=$HOME/rsss-runs/unet-subset-01 \
 # job follows it for the cache check and the default run directory.
 DATA_DIR=$HOME/rsss-data RUN_DIR=$HOME/rsss-runs/dinov3-probe-01 \
     TRAIN_CONFIG=configs/train_dinov3.yaml sbatch scripts/pando/job.sh
+
+# The BitFit+ and last-blocks arms read the same staged SAT-493M weights.
+DATA_DIR=$HOME/rsss-data RUN_DIR=$HOME/rsss-runs/dinov3-last-blocks-01 \
+    TRAIN_CONFIG=configs/train_dinov3_last_blocks.yaml sbatch scripts/pando/job.sh
 ```
 
 `scripts/pando/job.sh` runs the U-Net baseline for 30 epochs over the FLAIR#1

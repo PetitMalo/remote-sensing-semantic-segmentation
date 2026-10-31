@@ -76,6 +76,7 @@ BLOCK_SUFFIXES = (
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SHIPPED_CONFIG = REPO_ROOT / "configs" / "train_dinov3.yaml"
 SHIPPED_BITFIT_CONFIG = REPO_ROOT / "configs" / "train_dinov3_bitfit.yaml"
+SHIPPED_LAST_BLOCKS_CONFIG = REPO_ROOT / "configs" / "train_dinov3_last_blocks.yaml"
 
 
 def small_backbone() -> Any:
@@ -645,6 +646,50 @@ def test_the_bitfit_recipe_only_differs_in_what_it_trains():
 
 def test_the_bitfit_recipe_builds_and_segments():
     config = load_train_config(SHIPPED_BITFIT_CONFIG)
+
+    net = build_model({**config.model, "pretrained": False, "classes": CLASSES})
+
+    assert isinstance(net, DinoLinearProbe)
+    assert net(torch.randn(1, 5, SIZE, SIZE)).shape == (1, CLASSES, SIZE, SIZE)
+
+
+def test_the_last_blocks_recipe_shares_everything_but_what_it_trains():
+    """Same data, loss, schedule and rates as the probe; only the adaptation differs."""
+    probe = load_train_config(SHIPPED_CONFIG)
+    last_blocks = load_train_config(SHIPPED_LAST_BLOCKS_CONFIG)
+
+    assert last_blocks.model["name"] == "dinov3_last_blocks"
+    assert last_blocks.model["model_name"] == probe.model["model_name"]
+    assert last_blocks.model["in_channels"] == probe.model["in_channels"]
+    assert last_blocks.model["train_stem"] is True
+    assert last_blocks.model["grad_checkpointing"] is True
+    assert last_blocks.model["unfreeze_blocks"] == 4
+    assert last_blocks.num_classes == probe.num_classes
+    assert last_blocks.loss == probe.loss
+    assert last_blocks.scheduler == probe.scheduler
+    assert last_blocks.datamodule == probe.datamodule
+
+    assert last_blocks.optimizer is not None
+    assert probe.optimizer is not None
+    for key in ("lr", "stem_lr", "weight_decay"):
+        assert last_blocks.optimizer[key] == probe.optimizer[key]
+    assert last_blocks.optimizer["blocks_lr"] < last_blocks.optimizer["lr"]
+    assert last_blocks.optimizer["blocks_lr"] == last_blocks.optimizer["stem_lr"]
+
+
+def test_the_last_blocks_recipe_outlasts_the_two_earlier_arms():
+    """The one deliberate departure: 50 M weights at 1e-4 need more epochs."""
+    probe = load_train_config(SHIPPED_CONFIG)
+    last_blocks = load_train_config(SHIPPED_LAST_BLOCKS_CONFIG)
+
+    assert last_blocks.trainer["max_epochs"] > probe.trainer["max_epochs"]
+    assert {
+        key: value for key, value in last_blocks.trainer.items() if key != "max_epochs"
+    } == {key: value for key, value in probe.trainer.items() if key != "max_epochs"}
+
+
+def test_the_last_blocks_recipe_builds_and_segments():
+    config = load_train_config(SHIPPED_LAST_BLOCKS_CONFIG)
 
     net = build_model({**config.model, "pretrained": False, "classes": CLASSES})
 
