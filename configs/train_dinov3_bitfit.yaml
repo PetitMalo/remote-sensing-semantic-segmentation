@@ -1,0 +1,69 @@
+# Training recipe for DINOv3's BitFit+ adaptation.
+#
+# The counterpart of configs/train_dinov3.yaml: same backbone, same linear head,
+# same stem handling, same loss, optimizer, schedule and data pipeline, so the
+# only difference between the two runs is *which* parameters move. Everything
+# else is copied verbatim on purpose -- do not tune one recipe without the other
+# unless the comparison is gone anyway.
+#
+# model       : forwarded to rsss.models.build_model ("name" plus its kwargs).
+#               The backbone is timm's ViT-L/16 distilled on SAT-493M; the head
+#               is the 1x1 convolution of the DINOv3 linear probe. Besides the
+#               head and the patch-embedding stem, dinov3_bitfit trains every
+#               bias, every LayerNorm affine pair and every LayerScale vector
+#               (296,960 parameters, ~0.1% of the backbone).
+model:
+  name: dinov3_bitfit
+  model_name: vit_large_patch16_dinov3.sat493m
+  pretrained: true
+  in_channels: 5
+  freeze_backbone: true
+  # Keep the 5-band input: BitFit+ does not touch the stem's weights, so the
+  # zero-initial NIR/nDSM filters can only learn if the stem trains.
+  train_stem: true
+  # The backward pass now reaches all 24 blocks, unlike the frozen probe.
+  # Recomputing them keeps batch 8 affordable on a 32 GB V100; turn it off only
+  # after checking the memory, since the batch size must stay at the probe's
+  # for the comparison to hold.
+  grad_checkpointing: true
+
+num_classes: 13
+
+loss:
+  ce: 0.5
+  dice: 0.5
+
+optimizer:
+  # Same rates as the probe: the BitFit+ group gets the head's, so that a
+  # difference in the results comes from the parameter set, not the step size.
+  # `bitfit_lr` also sets the rate of a much larger group of tensors; raise it
+  # only in a deliberate sweep, and bump the probe's `lr` alongside.
+  lr: 1.0e-3
+  bitfit_lr: 1.0e-3
+  stem_lr: 1.0e-4
+  weight_decay: 1.0e-4
+
+scheduler:
+  warmup_epochs: 1
+
+trainer:
+  # The probe converges in a few epochs; with BitFit+ the blocks also move, but
+  # the schedule stays at 10 epochs to keep the two runs comparable.
+  max_epochs: 10
+  accelerator: auto
+  devices: 1
+  precision: 16-mixed
+  log_every_n_steps: 10
+
+datamodule:
+  # Same as the probe. Gradient checkpointing buys the batch size back; lower it
+  # if a run reports CUDA out of memory, and note it in the run directory.
+  batch_size: 8
+  num_workers: 8
+  # DINOv3's SAT-493M statistics, in [0, 1] units and multiplied by 255 for the
+  # raw uint8 rasters: mean (0.430, 0.411, 0.296), std (0.213, 0.156, 0.143).
+  # SAT-493M is RGB-only, so NIR and nDSM keep FLAIR#1's official statistics --
+  # the stem standardizes on its own means, not on the backbone's.
+  norm_type: custom
+  means: [109.65, 104.805, 75.48, 106.38, 53.26]
+  stds: [54.315, 39.78, 36.465, 39.69, 79.3]

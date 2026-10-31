@@ -18,8 +18,9 @@ def test_smp_style_builder_gets_encoder_weights_none():
     assert offline_model_config({"name": "unet"})["encoder_weights"] is None
 
 
-def test_timm_style_builder_gets_pretrained_false():
-    config = offline_model_config({"name": "dinov3_linear_probe", "pretrained": True})
+@pytest.mark.parametrize("name", ["dinov3_linear_probe", "dinov3_bitfit"])
+def test_timm_style_builder_gets_pretrained_false(name):
+    config = offline_model_config({"name": name, "pretrained": True})
 
     assert config["pretrained"] is False
 
