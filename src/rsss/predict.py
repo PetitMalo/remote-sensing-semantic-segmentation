@@ -25,6 +25,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
+from rsss.models import offline_model_config
 from rsss.train import build_datamodule
 from rsss.training.config import TrainConfig, load_train_config
 from rsss.training.module import SegmentationModule, _to_class_indices
@@ -90,7 +91,7 @@ def load_module(
         The module in eval mode, on ``device``.
     """
     module = SegmentationModule(
-        model={**dict(config.model), "encoder_weights": None},
+        model=offline_model_config(config.model),
         num_classes=config.num_classes,
         loss=config.loss,
         optimizer=config.optimizer,

@@ -39,6 +39,17 @@ TILE_SIZE = 64
 
 MODEL = {"name": "unet", "encoder_weights": None, "in_channels": IN_CHANNELS}
 
+# A DINOv3 ViT-S/16: the cheap test stand-in for the SAT-493M ViT-L, as in
+# ``tests/models/test_dinov3.py``. ``pretrained: True`` on purpose: load_module
+# must override it, predicting never downloads the 1.2 GB backbone.
+DINO_MODEL = {
+    "name": "dinov3_linear_probe",
+    "model_name": "vit_small_patch16_dinov3.lvd1689m",
+    "pretrained": True,
+    "in_channels": IN_CHANNELS,
+}
+SIZE = 64
+
 
 def parse(argv: list[str]):
     """Parse ``argv`` with the entry point's own parser."""
@@ -118,6 +129,35 @@ def test_load_module_builds_without_pretrained_weights(tmp_path, monkeypatch):
     load_module(checkpoint, tiny_config(), device="cpu")
 
     assert built[0]["encoder_weights"] is None
+
+
+def test_load_module_builds_the_probe_without_pretrained_weights(tmp_path):
+    """The DINOv3 builder takes ``pretrained``, not ``encoder_weights``.
+
+    A recipe shipped with the download enabled (the training one) turns into
+    an offline build, and the checkpoint's weights end up in the network.
+    """
+    module = SegmentationModule(
+        model=DINO_MODEL,
+        num_classes=NUM_CLASSES,
+        scheduler={"warmup_epochs": 0, "t_max": 1},
+    )
+    checkpoint = tmp_path / "model.ckpt"
+    torch.save({"state_dict": module.state_dict()}, checkpoint)
+
+    loaded = load_module(
+        checkpoint,
+        TrainConfig(
+            model=DINO_MODEL,
+            num_classes=NUM_CLASSES,
+            scheduler={"warmup_epochs": 0, "t_max": 1},
+        ),
+        device="cpu",
+    )
+
+    sample = torch.randn(1, IN_CHANNELS, SIZE, SIZE)
+    with torch.no_grad():
+        assert torch.allclose(module(sample), loaded(sample))
 
 
 # --------------------------------------------------------------------------- #
