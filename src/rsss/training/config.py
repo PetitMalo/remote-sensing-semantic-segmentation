@@ -23,9 +23,11 @@ import yaml
 _NESTED_SECTIONS = ("model", "loss", "optimizer", "scheduler", "trainer", "datamodule")
 _ALLOWED_KEYS = frozenset(_NESTED_SECTIONS) | {"num_classes", "class_weights"}
 _REQUIRED_KEYS = frozenset({"model", "num_classes"})
-# Keys owned by the data config: ``FlairDatamodule`` refuses them alongside a
-# ``config``, so a ``datamodule`` section carrying one could never work.
-_DATA_KEYS = frozenset({"config", "data_dir", "dataset", "download"})
+# Keys the training entry point sets itself: the data config owns the first
+# four, and the recipe's top-level ``num_classes`` owns the last.
+_RESERVED_DATAMODULE_KEYS = frozenset(
+    {"config", "data_dir", "dataset", "download", "num_classes"}
+)
 
 
 @dataclass(frozen=True)
@@ -80,8 +82,8 @@ def load_train_config(path: str | Path) -> TrainConfig:
         If the file or one of its sections is not a YAML mapping, or if
         ``num_classes`` is not an integer.
     ValueError
-        If the file holds unknown keys, is missing a required key, or sets one
-        of the data-config keys in its ``datamodule`` section.
+        If the file holds unknown keys, is missing a required key, or sets a
+        reserved key in its ``datamodule`` section.
     """
     path = Path(path)
     if not path.is_file():
@@ -111,11 +113,12 @@ def load_train_config(path: str | Path) -> TrainConfig:
         raise TypeError(f"{path}: 'num_classes' must be an int, got {num_classes!r}.")
 
     datamodule = raw.get("datamodule", {})
-    data_keys = sorted(_DATA_KEYS & set(datamodule))
-    if data_keys:
+    reserved = sorted(_RESERVED_DATAMODULE_KEYS & set(datamodule))
+    if reserved:
         raise ValueError(
-            f"{path}: the 'datamodule' section must not set {data_keys}; they come "
-            "from the data config, and FlairDatamodule refuses both at once."
+            f"{path}: the 'datamodule' section must not set {reserved}; the data "
+            "config owns config/data_dir/dataset/download and the recipe's "
+            "top-level num_classes owns num_classes."
         )
 
     return TrainConfig(

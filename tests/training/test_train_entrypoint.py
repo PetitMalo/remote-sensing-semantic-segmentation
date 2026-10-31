@@ -175,6 +175,14 @@ def test_without_the_flag_the_data_config_data_dir_is_kept(data_config):
     assert datamodule.data_dir == str(Path("data") / TOY_DATASET.name)
 
 
+def test_build_datamodule_forwards_num_classes(data_config):
+    config = TrainConfig(model=TINY_MODEL, num_classes=3)
+
+    datamodule = build_datamodule(config, parse(["--data-config", str(data_config)]))
+
+    assert datamodule.num_classes == 3
+
+
 def test_build_module_forwards_the_recipe():
     config = TrainConfig(
         model=TINY_MODEL,

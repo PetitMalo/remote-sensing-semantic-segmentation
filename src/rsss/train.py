@@ -145,7 +145,11 @@ def build_datamodule(config: TrainConfig, args: argparse.Namespace) -> FlairData
     data_config = load_data_config(args.data_config)
     if args.data_dir is not None:
         data_config = dataclasses.replace(data_config, data_dir=Path(args.data_dir))
-    return FlairDatamodule(config=data_config, **dict(config.datamodule))
+    return FlairDatamodule(
+        config=data_config,
+        num_classes=config.num_classes,
+        **dict(config.datamodule),
+    )
 
 
 def build_module(config: TrainConfig) -> SegmentationModule:
