@@ -274,6 +274,22 @@ def _env_float(name: str) -> float | None:
     return float(value) if value else None
 
 
+def _env_bool(name: str) -> bool:
+    """Read a boolean environment variable, rejecting ambiguous spellings."""
+    value = os.environ.get(name, "").strip().lower()
+    if not value:
+        return False
+    # ``scripts/pando/job.sh`` spells resume as ``RESUME=last``; accept it so
+    # one environment convention works for both targets.
+    if value in {"1", "true", "yes", "on", "last"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(
+        f"{name} must be a boolean (1/true/yes/on or 0/false/no/off), got {value!r}."
+    )
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     """Return the parser of the submission entry point."""
     parser = argparse.ArgumentParser(description=__doc__)
@@ -306,7 +322,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--resume",
         action="store_true",
-        default=bool(os.environ.get("RESUME")),
+        default=_env_bool("RESUME"),
         help="Continue from the run's last checkpoint when GCS holds one.",
     )
     parser.add_argument(
