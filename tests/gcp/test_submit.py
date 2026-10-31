@@ -12,6 +12,7 @@ from rsss.gcp.config import GcpConfig
 from rsss.gcp.storage import code_uri
 from rsss.gcp.submit import (
     Submission,
+    build_arg_parser,
     build_create_command,
     default_run_name,
     execute,
@@ -183,3 +184,43 @@ def test_the_follow_up_names_the_logs_the_run_and_the_cleanup(capsys):
     assert f"gs://{CONFIG.bucket}/runs/{RUN}/" in printed
     assert "scripts/gcp/pull_run.sh unet-01" in printed
     assert "gcloud compute instances delete rsss-unet-01" in printed
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (None, False),
+        ("", False),
+        ("0", False),
+        ("false", False),
+        ("no", False),
+        ("off", False),
+        ("1", True),
+        ("true", True),
+        ("yes", True),
+        ("on", True),
+        ("last", True),
+    ],
+)
+def test_resume_reads_the_environment_as_a_boolean(monkeypatch, value, expected):
+    if value is None:
+        monkeypatch.delenv("RESUME", raising=False)
+    else:
+        monkeypatch.setenv("RESUME", value)
+
+    args = build_arg_parser().parse_args([])
+
+    assert args.resume is expected
+
+
+def test_resume_rejects_an_ambiguous_environment_value(monkeypatch):
+    monkeypatch.setenv("RESUME", "maybe")
+
+    with pytest.raises(ValueError, match="RESUME must be a boolean"):
+        build_arg_parser()
+
+
+def test_resume_flag_still_works(monkeypatch):
+    monkeypatch.delenv("RESUME", raising=False)
+
+    assert build_arg_parser().parse_args(["--resume"]).resume is True
