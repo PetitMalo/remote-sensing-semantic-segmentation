@@ -26,10 +26,13 @@ from rsss.models.dinov3 import (
     DinoLinearProbe,
     bitfit_parameters,
     build_dinov3_bitfit,
+    build_dinov3_last_blocks,
     build_dinov3_linear_probe,
     dinov3_normalization,
     expand_patch_embed,
+    last_block_parameters,
     unfreeze_bitfit,
+    unfreeze_last_blocks,
 )
 from rsss.training.config import load_train_config
 from rsss.training.module import SegmentationModule
@@ -51,6 +54,22 @@ BITFIT_BLOCK_SUFFIXES = (
     "norm2.bias",
     "attn.proj.bias",
     "mlp.fc1.bias",
+    "mlp.fc2.bias",
+)
+#: Every tensor a block holds, i.e. what a whole-block fine-tune trains.
+BLOCK_SUFFIXES = (
+    "gamma_1",
+    "gamma_2",
+    "norm1.weight",
+    "norm1.bias",
+    "attn.qkv.weight",
+    "attn.proj.weight",
+    "attn.proj.bias",
+    "norm2.weight",
+    "norm2.bias",
+    "mlp.fc1.weight",
+    "mlp.fc1.bias",
+    "mlp.fc2.weight",
     "mlp.fc2.bias",
 )
 
@@ -90,6 +109,30 @@ def small_bitfit(**overrides) -> DinoLinearProbe:
     }
     kwargs.update(overrides)
     return cast(DinoLinearProbe, build_dinov3_bitfit(**kwargs))
+
+
+def small_last_blocks(**overrides) -> DinoLinearProbe:
+    """Return the last-blocks model on the small backbone, offline and fast."""
+    kwargs = {
+        "model_name": SMALL_MODEL,
+        "pretrained": False,
+        "in_channels": 5,
+        "classes": CLASSES,
+        "grad_checkpointing": False,
+        "unfreeze_blocks": 2,
+    }
+    kwargs.update(overrides)
+    return cast(DinoLinearProbe, build_dinov3_last_blocks(**kwargs))
+
+
+def expected_last_blocks_names(depth: int, num_blocks: int) -> set[str]:
+    """Return the block tensors a last-blocks run trains, besides the stem."""
+    blocks = {
+        f"blocks.{index}.{suffix}"
+        for index in range(depth - num_blocks, depth)
+        for suffix in BLOCK_SUFFIXES
+    }
+    return {"norm.weight", "norm.bias"} | blocks
 
 
 def expected_bitfit_names(depth: int) -> set[str]:
@@ -392,6 +435,170 @@ def test_bitfit_enables_gradient_checkpointing_by_default():
 
 def test_checkpointed_blocks_still_return_full_resolution_logits():
     net = small_bitfit(grad_checkpointing=True)
+
+    assert net(torch.randn(1, 5, SIZE, SIZE)).shape == (1, CLASSES, SIZE, SIZE)
+
+
+# --------------------------------------------------------------------------- #
+# Last-blocks fine-tuning                                                     #
+# --------------------------------------------------------------------------- #
+
+
+def test_last_blocks_is_registered():
+    assert "dinov3_last_blocks" in MODEL_REGISTRY
+
+
+def test_last_block_parameters_takes_the_trailing_blocks_whole():
+    backbone = small_backbone()
+
+    selected = last_block_parameters(backbone, 2)
+
+    named = {
+        name
+        for name, parameter in backbone.named_parameters()
+        if id(parameter) in {id(p) for p in selected}
+    }
+    assert named == expected_last_blocks_names(SMALL_DEPTH, 2)
+    assert len(selected) == len({id(parameter) for parameter in selected})
+
+
+def test_last_block_parameters_rejects_an_empty_selection():
+    with pytest.raises(ValueError, match="outside 1..12"):
+        last_block_parameters(small_backbone(), 0)
+
+
+def test_last_block_parameters_rejects_more_blocks_than_the_depth():
+    with pytest.raises(ValueError, match="outside 1..12"):
+        last_block_parameters(small_backbone(), SMALL_DEPTH + 1)
+
+
+def test_unfreeze_last_blocks_switches_on_exactly_the_selected_parameters():
+    net = small_probe()
+    selected = {id(p) for p in last_block_parameters(net.backbone, 2)}
+
+    enabled = unfreeze_last_blocks(net.backbone, 2)
+
+    assert {id(p) for p in enabled} == selected
+    assert all(parameter.requires_grad for parameter in enabled)
+
+
+def test_last_blocks_trains_the_trailing_blocks_the_norm_and_the_stem():
+    net = small_last_blocks()
+
+    trainable = {name for name, p in net.backbone.named_parameters() if p.requires_grad}
+
+    stem = {"patch_embed.proj.weight", "patch_embed.proj.bias"}
+    assert trainable == stem | expected_last_blocks_names(SMALL_DEPTH, 2)
+
+
+def test_last_blocks_leaves_the_blocks_below_frozen():
+    net = small_last_blocks()
+
+    frozen = {
+        name for name, p in net.backbone.named_parameters() if not p.requires_grad
+    }
+
+    for name in (
+        "blocks.0.attn.qkv.weight",
+        "blocks.0.gamma_1",
+        "blocks.0.norm1.weight",
+        "blocks.9.mlp.fc2.bias",
+        "blocks.9.attn.proj.weight",
+        "cls_token",
+        "reg_token",
+    ):
+        assert name in frozen
+
+
+def test_last_blocks_gradients_reach_the_first_unfrozen_block_only():
+    net = small_last_blocks()
+    net.train()
+
+    logits = net(torch.randn(2, 5, SIZE, SIZE))
+    labels = torch.randint(0, CLASSES, (2, SIZE, SIZE))
+    F.cross_entropy(logits, labels).backward()
+
+    gradients = {name: p.grad for name, p in net.backbone.named_parameters()}
+    for name in (
+        "blocks.10.attn.qkv.weight",
+        "blocks.10.mlp.fc2.weight",
+        "blocks.11.attn.proj.weight",
+        "norm.weight",
+        "patch_embed.proj.weight",
+    ):
+        gradient = gradients[name]
+        assert gradient is not None and gradient.abs().sum() > 0, name
+    assert gradients["blocks.9.attn.qkv.weight"] is None
+
+
+def test_last_blocks_adds_a_blocks_group_holding_the_whole_blocks():
+    net = small_last_blocks()
+
+    groups = net.parameter_groups()
+
+    assert set(groups) == {"blocks", "stem", "backbone", "head"}
+    assert {id(p) for p in groups["blocks"]} == {
+        id(p) for p in last_block_parameters(net.backbone, 2)
+    }
+    assert all(not p.requires_grad for p in groups["backbone"])
+    listed = [id(p) for parameters in groups.values() for p in parameters]
+    assert len(listed) == len(set(listed))
+    assert set(listed) == {id(p) for p in net.parameters()}
+
+
+def test_the_blocks_group_is_optimized_at_its_own_rate():
+    module = SegmentationModule(
+        model={
+            "name": "dinov3_last_blocks",
+            "model_name": SMALL_MODEL,
+            "pretrained": False,
+            "grad_checkpointing": False,
+            "unfreeze_blocks": 2,
+        },
+        num_classes=CLASSES,
+        optimizer={"lr": 1e-3, "blocks_lr": 1e-4, "stem_lr": 1e-5},
+        scheduler={"warmup_epochs": 0, "t_max": 2},
+    )
+
+    optimizer = cast(Any, module.configure_optimizers())["optimizer"]
+
+    # Group order follows parameter_groups(): blocks, stem, then the head.
+    assert [group["lr"] for group in optimizer.param_groups] == [1e-4, 1e-5, 1e-3]
+
+
+def test_the_satellite_last_blocks_parameter_budget_is_pinned():
+    """The ViT-L budget the recipe documents: 51,707,917 trainable of 303 M."""
+    net = cast(DinoLinearProbe, build_dinov3_last_blocks(pretrained=False))
+
+    trainable = sum(p.numel() for p in net.parameters() if p.requires_grad)
+
+    assert trainable == 51_707_917
+
+
+def test_last_blocks_refuses_a_backbone_that_is_not_frozen():
+    with pytest.raises(ValueError, match="freeze_backbone=False"):
+        build_dinov3_last_blocks(pretrained=False, freeze_backbone=False)
+
+
+def test_last_blocks_refuses_more_blocks_than_the_backbone_has():
+    with pytest.raises(ValueError, match="outside 1..12"):
+        small_last_blocks(unfreeze_blocks=SMALL_DEPTH + 1)
+
+
+def test_last_blocks_enables_gradient_checkpointing_by_default():
+    net = cast(
+        DinoLinearProbe,
+        build_dinov3_last_blocks(model_name=SMALL_MODEL, pretrained=False),
+    )
+
+    assert net.backbone.grad_checkpointing is True
+    assert (
+        small_last_blocks(grad_checkpointing=False).backbone.grad_checkpointing is False
+    )
+
+
+def test_checkpointed_last_blocks_still_return_full_resolution_logits():
+    net = small_last_blocks(grad_checkpointing=True)
 
     assert net(torch.randn(1, 5, SIZE, SIZE)).shape == (1, CLASSES, SIZE, SIZE)
 
