@@ -12,6 +12,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT"
 
 CONFIG="${GCP_CONFIG:-configs/gcp.yaml}"
+DATA_CONFIG="${DATA_CONFIG:-configs/data_full.yaml}"
 RUN="${1:-${RUN:-}}"
 if [ -z "$RUN" ]; then
     echo "usage: $0 RUN" >&2
@@ -30,6 +31,7 @@ Score and plot it locally with:
   uv run python -m rsss.predict \\
       --checkpoint "$DEST/checkpoints/last.ckpt" \\
       --metrics "$DEST/csv" \\
+      --data-config "$DATA_CONFIG" \\
       --data-dir data \\
       --output-dir "$DEST/figures"
 EOF
