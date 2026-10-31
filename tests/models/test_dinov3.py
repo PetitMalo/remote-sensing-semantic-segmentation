@@ -56,6 +56,7 @@ BITFIT_BLOCK_SUFFIXES = (
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SHIPPED_CONFIG = REPO_ROOT / "configs" / "train_dinov3.yaml"
+SHIPPED_BITFIT_CONFIG = REPO_ROOT / "configs" / "train_dinov3_bitfit.yaml"
 
 
 def small_backbone() -> Any:
@@ -410,3 +411,35 @@ def test_the_shipped_recipe_uses_the_satellite_statistics():
     assert config.datamodule["stds"][:3] == pytest.approx(stds)
     assert config.optimizer is not None
     assert config.optimizer["stem_lr"] < config.optimizer["lr"]
+
+
+def test_the_bitfit_recipe_only_differs_in_what_it_trains():
+    """Every other knob is shared with the probe, or the comparison is void."""
+    probe = load_train_config(SHIPPED_CONFIG)
+    bitfit = load_train_config(SHIPPED_BITFIT_CONFIG)
+
+    assert bitfit.model["name"] == "dinov3_bitfit"
+    assert bitfit.model["model_name"] == probe.model["model_name"]
+    assert bitfit.model["in_channels"] == probe.model["in_channels"]
+    assert bitfit.model["train_stem"] is True
+    assert bitfit.model["grad_checkpointing"] is True
+    assert bitfit.num_classes == probe.num_classes
+    assert bitfit.loss == probe.loss
+    assert bitfit.scheduler == probe.scheduler
+    assert bitfit.trainer == probe.trainer
+    assert bitfit.datamodule == probe.datamodule
+
+    assert bitfit.optimizer is not None
+    assert probe.optimizer is not None
+    assert bitfit.optimizer["bitfit_lr"] == bitfit.optimizer["lr"]
+    for key in ("lr", "stem_lr", "weight_decay"):
+        assert bitfit.optimizer[key] == probe.optimizer[key]
+
+
+def test_the_bitfit_recipe_builds_and_segments():
+    config = load_train_config(SHIPPED_BITFIT_CONFIG)
+
+    net = build_model({**config.model, "pretrained": False, "classes": CLASSES})
+
+    assert isinstance(net, DinoLinearProbe)
+    assert net(torch.randn(1, 5, SIZE, SIZE)).shape == (1, CLASSES, SIZE, SIZE)
