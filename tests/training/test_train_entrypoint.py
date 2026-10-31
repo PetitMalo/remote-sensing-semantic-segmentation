@@ -26,6 +26,7 @@ from rsss.train import (
     main,
     resolve_resume_checkpoint,
     run,
+    seed_everything,
 )
 from rsss.training.config import TrainConfig
 
@@ -174,6 +175,14 @@ def test_without_the_flag_the_data_config_data_dir_is_kept(data_config):
     assert datamodule.data_dir == str(Path("data") / TOY_DATASET.name)
 
 
+def test_build_datamodule_forwards_num_classes(data_config):
+    config = TrainConfig(model=TINY_MODEL, num_classes=3)
+
+    datamodule = build_datamodule(config, parse(["--data-config", str(data_config)]))
+
+    assert datamodule.num_classes == 3
+
+
 def test_build_module_forwards_the_recipe():
     config = TrainConfig(
         model=TINY_MODEL,
@@ -192,6 +201,48 @@ def test_build_module_forwards_the_recipe():
     assert class_weights is not None
     assert class_weights.tolist() == [1.0, 2.0, 3.0]
     assert module.optimizer_cfg["lr"] == 1e-3
+
+
+def test_seed_everything_forwards_to_lightning(monkeypatch):
+    calls: list[tuple[int, bool]] = []
+    monkeypatch.setattr(
+        "rsss.train.pl.seed_everything",
+        lambda seed, workers: calls.append((seed, workers)),
+    )
+
+    seed_everything(7)
+    seed_everything(None)
+
+    assert calls == [(7, True)]
+
+
+def test_run_seeds_before_building_the_module(monkeypatch):
+    calls: list[str] = []
+
+    class _StubTrainer:
+        def fit(self, *args, **kwargs):
+            return None
+
+        def test(self, *args, **kwargs):
+            return None
+
+    monkeypatch.setattr(
+        "rsss.train.pl.seed_everything",
+        lambda seed, workers: calls.append("seed"),
+    )
+    monkeypatch.setattr(
+        "rsss.train.load_train_config",
+        lambda path: TrainConfig(model=TINY_MODEL, num_classes=3),
+    )
+    monkeypatch.setattr("rsss.train.build_datamodule", lambda config, args: None)
+    monkeypatch.setattr(
+        "rsss.train.build_module", lambda config: calls.append("module")
+    )
+    monkeypatch.setattr("rsss.train.build_trainer", lambda config, args: _StubTrainer())
+
+    run(parse(["--seed", "3", "--skip-test"]))
+
+    assert calls == ["seed", "module"]
 
 
 def test_trainer_honours_the_recipe_and_the_flags(tmp_path):

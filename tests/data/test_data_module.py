@@ -288,6 +288,25 @@ def test_val_dataloader_preserves_order(discovery_calls):
     assert isinstance(loader.sampler, SequentialSampler)
 
 
+def test_val_dataloader_keeps_the_last_batch(monkeypatch):
+    splits = {
+        "train": {"IMG": ["train_img.tif"], "MSK": ["train_msk.tif"]},
+        "validation": {
+            "IMG": [f"val_img_{index}.tif" for index in range(10)],
+            "MSK": [f"val_msk_{index}.tif" for index in range(10)],
+        },
+        "test": {"IMG": ["test_img.tif"], "MSK": ["test_msk.tif"]},
+    }
+    monkeypatch.setattr("rsss.data.data_module.build_flair_splits", lambda _: splits)
+    datamodule = FlairDatamodule(batch_size=8, drop_last=True)
+    datamodule.setup("fit")
+
+    loader = datamodule.val_dataloader()
+
+    assert loader.drop_last is False
+    assert len(loader) == 2
+
+
 def test_predict_dataloader_uses_single_item_batches(discovery_calls):
     datamodule = FlairDatamodule(batch_size=8, drop_last=True)
     datamodule.setup("predict")

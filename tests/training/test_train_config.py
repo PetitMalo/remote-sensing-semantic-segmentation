@@ -136,8 +136,10 @@ def test_num_classes_must_be_an_integer(write_config):
         load_train_config(path)
 
 
-@pytest.mark.parametrize("key", ["data_dir", "dataset", "download", "config"])
-def test_the_datamodule_section_rejects_data_config_keys(write_config, key):
+@pytest.mark.parametrize(
+    "key", ["data_dir", "dataset", "download", "config", "num_classes"]
+)
+def test_the_datamodule_section_rejects_reserved_keys(write_config, key):
     path = write_config({**MINIMAL, "datamodule": {key: "whatever"}})
 
     with pytest.raises(ValueError, match="must not set"):

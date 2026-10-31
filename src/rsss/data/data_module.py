@@ -213,7 +213,7 @@ class FlairDatamodule(LightningDataModule):
             batch_size=self.batch_size,
             shuffle=False,
             num_workers=self.num_workers,
-            drop_last=self.drop_last,
+            drop_last=False,
         )
 
     def test_dataloader(self):
