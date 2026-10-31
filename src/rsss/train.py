@@ -134,6 +134,12 @@ def resolve_resume_checkpoint(args: argparse.Namespace) -> Path | None:
     return checkpoint
 
 
+def seed_everything(seed: int | None) -> None:
+    """Seed Python, NumPy, torch and the dataloader workers, when a seed is set."""
+    if seed is not None:
+        pl.seed_everything(seed, workers=True)
+
+
 def build_datamodule(config: TrainConfig, args: argparse.Namespace) -> FlairDatamodule:
     """Build the data module from the data config and the recipe's settings."""
     data_config = load_data_config(args.data_config)
@@ -201,8 +207,6 @@ def build_checkpoint_callbacks(output_dir: str | Path) -> list[Callback]:
 
 def build_trainer(config: TrainConfig, args: argparse.Namespace) -> pl.Trainer:
     """Build the Trainer, logging and checkpointing under ``--output-dir``."""
-    if args.seed is not None:
-        pl.seed_everything(args.seed, workers=True)
     output_dir = Path(args.output_dir)
     return pl.Trainer(
         **_trainer_kwargs(config, args),
@@ -222,6 +226,7 @@ def run(args: argparse.Namespace) -> pl.Trainer:
     """
     if args.fast_dev_run and args.resume is not None:
         raise ValueError("--fast-dev-run and --resume are mutually exclusive.")
+    seed_everything(args.seed)
     checkpoint = resolve_resume_checkpoint(args)
     config = load_train_config(args.config)
     datamodule = build_datamodule(config, args)
