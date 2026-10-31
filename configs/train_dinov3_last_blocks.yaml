@@ -1,0 +1,83 @@
+# Training recipe for DINOv3 fine-tuned from its last blocks.
+#
+# The third arm after configs/train_dinov3.yaml (frozen probe) and
+# configs/train_dinov3_bitfit.yaml (BitFit+): same backbone, same linear head,
+# same stem handling, same loss, optimizer and data pipeline. What changes is
+# how much of the backbone moves, and therefore how long it needs to move.
+#
+# model       : forwarded to rsss.models.build_model ("name" plus its kwargs).
+#               The backbone is timm's ViT-L/16 distilled on SAT-493M; the head
+#               is the 1x1 convolution of the DINOv3 linear probe. Besides the
+#               head and the patch-embedding stem, dinov3_last_blocks trains the
+#               last `unfreeze_blocks` blocks (*) whole -- attention qkv/proj,
+#               MLP fc1/fc2, both LayerNorm affine pairs and both LayerScale
+#               vectors -- plus the trunk's final LayerNorm: 51,707,917
+#               parameters, ~17% of the backbone, against 1.6 M for BitFit+.
+#               (*) 4 of 24 blocks means blocks 20-23.
+model:
+  name: dinov3_last_blocks
+  model_name: vit_large_patch16_dinov3.sat493m
+  pretrained: true
+  in_channels: 5
+  # How many trailing blocks train whole. 4 is the first step that lets
+  # token-mixing weights move at all; raise it to 6 or 8 in a deliberate sweep,
+  # and expect the memory and the epoch time to grow with it.
+  unfreeze_blocks: 4
+  # Keep the 5-band input: the unfrozen blocks need the zero-initial NIR/nDSM
+  # filters to carry information, and only the stem can learn them.
+  train_stem: true
+  # The backward pass now reaches the last four blocks with all their weights,
+  # unlike BitFit+ where only biases and scales moved. Recomputing each block
+  # keeps batch 8 affordable on a 32 GB V100; turn it off only after checking
+  # the memory, since the batch size must stay at the probe's for the
+  # comparison to hold.
+  grad_checkpointing: true
+
+num_classes: 13
+
+loss:
+  ce: 0.5
+  dice: 0.5
+
+optimizer:
+  # The head keeps the probe's rate, so a difference in the results does not
+  # come from the classifier. `blocks_lr` is an order of magnitude lower: 50 M
+  # pretrained weights at 1e-3 would be destroyed in the first epoch, and it
+  # matches the stem's rate for the same reason. `stem_lr` is unchanged from
+  # the two earlier arms.
+  lr: 1.0e-3
+  blocks_lr: 1.0e-4
+  stem_lr: 1.0e-4
+  weight_decay: 1.0e-4
+
+scheduler:
+  warmup_epochs: 1
+
+trainer:
+  # Deliberately longer than the probe's and BitFit+'s 10 epochs: those only
+  # moved a handful of scalars, while these blocks move 50 M weights at a
+  # tenth of the head's rate. This is the one knob that departs from the other
+  # two recipes, so read the mIoU against them as indicative, not as a
+  # like-for-like comparison at equal budget. A control run at equal budget is
+  # a single `EPOCHS=10` submit with the same RUN_DIR-free command line.
+  max_epochs: 20
+  accelerator: auto
+  devices: 1
+  precision: 16-mixed
+  log_every_n_steps: 10
+
+datamodule:
+  # Same as the probe and BitFit+. Gradient checkpointing buys the batch size
+  # back, but the four unfrozen blocks also keep optimizer state (AdamW holds
+  # two moments plus the fp32 master copy): watch the first run for CUDA out of
+  # memory, and note any batch change in the run directory, since it breaks the
+  # comparison with the earlier arms.
+  batch_size: 8
+  num_workers: 8
+  # DINOv3's SAT-493M statistics, in [0, 1] units and multiplied by 255 for the
+  # raw uint8 rasters: mean (0.430, 0.411, 0.296), std (0.213, 0.156, 0.143).
+  # SAT-493M is RGB-only, so NIR and nDSM keep FLAIR#1's official statistics --
+  # the stem standardizes on its own means, not on the backbone's.
+  norm_type: custom
+  means: [109.65, 104.805, 75.48, 106.38, 53.26]
+  stds: [54.315, 39.78, 36.465, 39.69, 79.3]
