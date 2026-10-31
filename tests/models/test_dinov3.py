@@ -24,16 +24,35 @@ from rsss.models.dinov3 import (
     SAT_MEAN,
     SAT_STD,
     DinoLinearProbe,
+    bitfit_parameters,
+    build_dinov3_bitfit,
     build_dinov3_linear_probe,
     dinov3_normalization,
     expand_patch_embed,
+    unfreeze_bitfit,
 )
 from rsss.training.config import load_train_config
+from rsss.training.module import SegmentationModule
 
 # A DINOv3 ViT-S/16: same architecture and code path, 21 M parameters.
 SMALL_MODEL = "vit_small_patch16_dinov3.lvd1689m"
 SIZE = 64
 CLASSES = 3
+#: Depth of the stand-in above; the ViT-L every real run uses has 24 blocks.
+SMALL_DEPTH = 12
+#: The tensors BitFit+ trains inside a block: both LayerScale vectors, both
+#: LayerNorm affine pairs and the biases that exist (``qkv`` has none).
+BITFIT_BLOCK_SUFFIXES = (
+    "gamma_1",
+    "gamma_2",
+    "norm1.weight",
+    "norm1.bias",
+    "norm2.weight",
+    "norm2.bias",
+    "attn.proj.bias",
+    "mlp.fc1.bias",
+    "mlp.fc2.bias",
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SHIPPED_CONFIG = REPO_ROOT / "configs" / "train_dinov3.yaml"
@@ -57,6 +76,29 @@ def small_probe(**overrides) -> DinoLinearProbe:
     kwargs.update(overrides)
     # The registry decorator widens the builder's return type to ``nn.Module``.
     return cast(DinoLinearProbe, build_dinov3_linear_probe(**kwargs))
+
+
+def small_bitfit(**overrides) -> DinoLinearProbe:
+    """Return the BitFit+ model on the small backbone, offline and fast."""
+    kwargs = {
+        "model_name": SMALL_MODEL,
+        "pretrained": False,
+        "in_channels": 5,
+        "classes": CLASSES,
+        "grad_checkpointing": False,
+    }
+    kwargs.update(overrides)
+    return cast(DinoLinearProbe, build_dinov3_bitfit(**kwargs))
+
+
+def expected_bitfit_names(depth: int) -> set[str]:
+    """Return the block tensors BitFit+ trains, besides the stem."""
+    blocks = {
+        f"blocks.{index}.{suffix}"
+        for index in range(depth)
+        for suffix in BITFIT_BLOCK_SUFFIXES
+    }
+    return {"norm.weight", "norm.bias"} | blocks
 
 
 # --------------------------------------------------------------------------- #
@@ -209,6 +251,148 @@ def test_parameter_groups_partition_the_network():
     listed = [id(p) for parameters in groups.values() for p in parameters]
     assert len(listed) == len(set(listed))
     assert set(listed) == {id(p) for p in net.parameters()}
+
+
+# --------------------------------------------------------------------------- #
+# BitFit+                                                                     #
+# --------------------------------------------------------------------------- #
+
+
+def test_bitfit_is_registered():
+    assert "dinov3_bitfit" in MODEL_REGISTRY
+
+
+def test_bitfit_parameters_excludes_the_stem_and_lists_each_parameter_once():
+    backbone = small_backbone()
+
+    selected = bitfit_parameters(backbone)
+
+    stem = {id(p) for p in backbone.patch_embed.proj.parameters()}
+    assert stem.isdisjoint(id(parameter) for parameter in selected)
+    assert len(selected) == len({id(parameter) for parameter in selected})
+    assert [id(p) for p in selected] == [id(p) for p in bitfit_parameters(backbone)]
+
+
+def test_unfreeze_bitfit_switches_on_exactly_the_selected_parameters():
+    net = small_probe()
+
+    enabled = unfreeze_bitfit(net.backbone)
+
+    assert {id(p) for p in enabled} == {id(p) for p in bitfit_parameters(net.backbone)}
+    assert all(parameter.requires_grad for parameter in enabled)
+
+
+def test_bitfit_plus_trains_the_biases_norms_and_layerscales_of_every_block():
+    net = small_bitfit()
+
+    trainable = {name for name, p in net.backbone.named_parameters() if p.requires_grad}
+
+    stem = {"patch_embed.proj.weight", "patch_embed.proj.bias"}
+    assert trainable == stem | expected_bitfit_names(SMALL_DEPTH)
+
+
+def test_bitfit_plus_leaves_every_weight_that_mixes_tokens_frozen():
+    net = small_bitfit()
+
+    frozen = {
+        name for name, p in net.backbone.named_parameters() if not p.requires_grad
+    }
+
+    for name in (
+        "blocks.0.attn.qkv.weight",
+        "blocks.0.attn.proj.weight",
+        "blocks.0.mlp.fc1.weight",
+        "blocks.0.mlp.fc2.weight",
+        "blocks.11.attn.qkv.weight",
+        "cls_token",
+        "reg_token",
+    ):
+        assert name in frozen
+
+
+def test_bitfit_plus_gradients_reach_the_first_and_last_block():
+    net = small_bitfit()
+    net.train()
+
+    logits = net(torch.randn(2, 5, SIZE, SIZE))
+    labels = torch.randint(0, CLASSES, (2, SIZE, SIZE))
+    F.cross_entropy(logits, labels).backward()
+
+    gradients = {name: p.grad for name, p in net.backbone.named_parameters()}
+    for name in (
+        "blocks.0.gamma_1",
+        "blocks.0.norm1.weight",
+        "blocks.11.mlp.fc2.bias",
+        "norm.weight",
+        "patch_embed.proj.weight",
+    ):
+        gradient = gradients[name]
+        assert gradient is not None and gradient.abs().sum() > 0, name
+    assert gradients["blocks.0.attn.qkv.weight"] is None
+
+
+def test_the_satellite_bitfit_parameter_budget_is_pinned():
+    """The ViT-L budget the recipe documents: 296,960 BitFit+ of 1,622,029."""
+    net = cast(DinoLinearProbe, build_dinov3_bitfit(pretrained=False))
+
+    groups = net.parameter_groups()
+
+    assert sum(p.numel() for p in groups["bitfit"]) == 296_960
+    assert sum(p.numel() for p in net.parameters() if p.requires_grad) == 1_622_029
+
+
+def test_bitfit_plus_adds_its_own_parameter_group():
+    net = small_bitfit()
+
+    groups = net.parameter_groups()
+
+    assert set(groups) == {"bitfit", "stem", "backbone", "head"}
+    assert {id(p) for p in groups["bitfit"]} == {
+        id(p) for p in bitfit_parameters(net.backbone)
+    }
+    assert not any(p.requires_grad for p in groups["backbone"])
+    listed = [id(p) for parameters in groups.values() for p in parameters]
+    assert len(listed) == len(set(listed))
+    assert set(listed) == {id(p) for p in net.parameters()}
+
+
+def test_the_bitfit_group_is_optimized_at_its_own_rate():
+    module = SegmentationModule(
+        model={
+            "name": "dinov3_bitfit",
+            "model_name": SMALL_MODEL,
+            "pretrained": False,
+            "grad_checkpointing": False,
+        },
+        num_classes=CLASSES,
+        optimizer={"lr": 1e-3, "bitfit_lr": 2e-3, "stem_lr": 1e-4},
+        scheduler={"warmup_epochs": 0, "t_max": 2},
+    )
+
+    optimizer = cast(Any, module.configure_optimizers())["optimizer"]
+
+    # Group order follows parameter_groups(): bitfit, stem, then the head.
+    assert [group["lr"] for group in optimizer.param_groups] == [2e-3, 1e-4, 1e-3]
+
+
+def test_bitfit_refuses_a_backbone_that_is_not_frozen():
+    with pytest.raises(ValueError, match="freeze_backbone=False"):
+        build_dinov3_bitfit(pretrained=False, freeze_backbone=False)
+
+
+def test_bitfit_enables_gradient_checkpointing_by_default():
+    net = cast(
+        DinoLinearProbe, build_dinov3_bitfit(model_name=SMALL_MODEL, pretrained=False)
+    )
+
+    assert net.backbone.grad_checkpointing is True
+    assert small_bitfit(grad_checkpointing=False).backbone.grad_checkpointing is False
+
+
+def test_checkpointed_blocks_still_return_full_resolution_logits():
+    net = small_bitfit(grad_checkpointing=True)
+
+    assert net(torch.randn(1, 5, SIZE, SIZE)).shape == (1, CLASSES, SIZE, SIZE)
 
 
 # --------------------------------------------------------------------------- #
