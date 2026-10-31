@@ -19,6 +19,7 @@ venv/
 # --- Editors / OS ---
 .vscode/
 *.swp
+.opencode
 
 # --- Data ---
 /data/
@@ -32,6 +33,7 @@ venv/
 /checkpoints/
 slurm-*.out
 slurm-*.err
+*.log
 
 # --- Unit tests and coverage ---
 .coverage
