@@ -136,10 +136,12 @@ uv run python -m rsss.train --config configs/train_dinov3_last_blocks.yaml \
 Logs and checkpoints land under `--output-dir` (default `outputs/`). A run keeps
 only two checkpoints, `last.ckpt` and the one with the best validation mIoU, so
 its directory does not grow with the epoch count. It ends by scoring the test
-split, on the weights `last.ckpt` holds; add `--skip-test` to fit only.
-`--resume` alone continues from `<output-dir>/checkpoints/last.ckpt`; pass a
-path instead to pick another checkpoint. `--max-epochs` is always the total for
-the run, not the number of extra epochs.
+split on the best-validation checkpoint, not on the weights the last epoch
+left; add `--skip-test` to fit only, or `--test-checkpoint <path>` to score an
+existing checkpoint without training. `--resume` alone continues from
+`<output-dir>/checkpoints/last.ckpt`; pass a path instead to pick another
+checkpoint. `--max-epochs` is always the total for the run, not the number of
+extra epochs.
 
 ## Inspect a run
 
@@ -169,9 +171,9 @@ uv run python -m rsss.predict \
 `predictions.png` shows a few test tiles as image / ground truth / prediction,
 and, when `--metrics` is given, `results.png` draws the loss, mIoU and per-class
 IoU curves. The plots need matplotlib, which lives in the `dev` group, so run
-this step locally rather than on the cluster. `last.ckpt` holds the weights the
-test split was scored with; the `<epoch>-<step>.ckpt` beside it is the best
-validation mIoU, if you would rather predict from that one.
+this step locally rather than on the cluster. `last.ckpt` holds the final
+epoch's weights; the `<epoch>-<step>.ckpt` beside it is the best validation
+mIoU, which is what the test split was scored with.
 
 ## Run on PANDO
 
@@ -230,15 +232,17 @@ DATA_DIR=$HOME/rsss-data RUN_DIR=$HOME/rsss-runs/dinov3-last-blocks-01 \
 
 `scripts/pando/job.sh` runs the U-Net baseline for 30 epochs over the FLAIR#1
 subset by default (whole domains: 5,275 train, 3,550 val, 2,250 test tiles,
-13.6 GiB), then evaluates on the test split. The full dataset stays reachable
-with `DATA_CONFIG=configs/data_full.yaml DATASET=flair_1_full`, where the quota
-allows its ~146 GiB peak. It allocates 24
-hours; if the run hits the walltime, submit it again with the same `RUN_DIR` and
-`RESUME=last` to continue to epoch 30. It fails early if either the dataset or
+13.6 GiB), then scores the best-validation checkpoint on the test split. The
+full dataset stays reachable with
+`DATA_CONFIG=configs/data_full.yaml DATASET=flair_1_full`, where the quota
+allows its ~146 GiB peak. It allocates 24 hours; if the run hits the walltime,
+submit it again with the same `RUN_DIR` and `RESUME=last` to continue to epoch
+30. It fails early if either the dataset or
 the pretrained weights were not staged. The log lands in `logs/slurm-<jobid>.out`
 and the checkpoints, CSV metrics and per-class IoU under `RUN_DIR`. Override
-`DATA_DIR`, `RUN_DIR`, `TRAIN_CONFIG`, `EPOCHS`, `ENCODER`, `DINOV3_MODEL` or
-`RESUME` to change that; `EPOCHS` defaults to the recipe's own `max_epochs`:
+`DATA_DIR`, `RUN_DIR`, `TRAIN_CONFIG`, `EPOCHS`, `ENCODER`, `DINOV3_MODEL`,
+`RESUME` or `TEST_CHECKPOINT` to change that; `EPOCHS` defaults to the recipe's
+own `max_epochs`:
 
 ```bash
 DATA_DIR=/scratch/me/rsss-data RUN_DIR=/scratch/me/runs/run-01 EPOCHS=2 \
@@ -247,6 +251,12 @@ DATA_DIR=/scratch/me/rsss-data RUN_DIR=/scratch/me/runs/run-01 EPOCHS=2 \
 # Finish a run that reached the walltime.
 DATA_DIR=/scratch/me/rsss-data RUN_DIR=/scratch/me/runs/run-01 RESUME=last \
     sbatch scripts/pando/job.sh
+
+# Score an existing checkpoint on the test split without training, e.g. the
+# best one of an earlier run, to compare arms on their best epoch.
+DATA_DIR=/scratch/me/rsss-data RUN_DIR=/scratch/me/runs/run-01-eval \
+    TEST_CHECKPOINT=/scratch/me/runs/run-01/checkpoints/epoch=6-step=4613.ckpt \
+    TRAIN_CONFIG=configs/train_dinov3_bitfit.yaml sbatch scripts/pando/job.sh
 ```
 
 For a toy smoke test of the GPU path, select the toy config and cap the batches:
