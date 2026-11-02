@@ -175,6 +175,22 @@ this step locally rather than on the cluster. `last.ckpt` holds the final
 epoch's weights; the `<epoch>-<step>.ckpt` beside it is the best validation
 mIoU, which is what the test split was scored with.
 
+To compare several runs on their best-validation checkpoint, point the
+comparison entry point at the directory holding them:
+
+```bash
+uv run python -m rsss.compare --runs-root outputs/pando
+```
+
+It reads each `<run>/csv/version_0/metrics.csv` for the `val/mIoU` peak and
+`<run>/eval/csv/version_*/metrics.csv` for the `--test-checkpoint` scores, then
+writes `comparison.md` (leaderboard, per-class IoU, provenance of every number)
+and `comparison.csv` beside the runs. `--no-params` skips the checkpoints, whose
+Adam moments give the trainable-parameter count without rebuilding a model;
+`--baseline` picks the run the Δ mIoU column is measured against (the U-Net
+recipe's run by default). Runs without an `eval/` test row are skipped, so a
+root may hold partially downloaded runs.
+
 ## Run on PANDO
 
 PANDO's compute nodes have no outbound network, so stage the environment, the
