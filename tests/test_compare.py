@@ -405,6 +405,12 @@ def test_build_arg_parser_defaults() -> None:
     assert args.csv is None
     assert args.baseline is None
     assert args.no_params is False
+    assert args.figures is False
+    assert args.num_figures == 3
+    assert args.configs_dir == "configs"
+    assert args.data_config == "configs/data_subset.yaml"
+    assert args.data_dir is None
+    assert args.device is None
 
 
 def test_run_comparison_keeps_its_class_indices() -> None:
