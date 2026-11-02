@@ -20,7 +20,7 @@
 #
 # TRAIN_CONFIG selects the recipe and therefore the backbone: the U-Net
 # baseline (configs/train.yaml, 30 epochs) by default, or one of the DINOv3
-# arms (configs/train_dinov3*.yaml: the 10-epoch probe and BitFit+, the
+# arms (configs/train_dinov3*.yaml: the 10-epoch probe, BitFit+ and LoRA, the
 # 20-epoch last-blocks fine-tune). Each recipe's own max_epochs is
 # used unless EPOCHS overrides it, and the cache check below follows the choice:
 #

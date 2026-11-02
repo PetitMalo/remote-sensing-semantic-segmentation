@@ -18,6 +18,11 @@ the lightest adaptation that still lets the features themselves move.
 :func:`build_dinov3_last_blocks` sits between that and a full fine-tune: the
 last ``unfreeze_blocks`` blocks and the final norm train in full, which moves
 their token-mixing weights too, while the blocks below stay frozen.
+
+:func:`build_dinov3_lora` takes the other route to the same goal: a low-rank
+adapter beside every attention projection in every block, learned while the
+pretrained weights stay frozen. It moves token mixing throughout the depth for
+a few million parameters, where last-blocks moves it in four blocks for fifty.
 """
 
 from __future__ import annotations
@@ -32,6 +37,7 @@ from torch import Tensor, nn
 from torch.nn import functional as F
 
 from rsss.models import register_model
+from rsss.models.lora import apply_lora, lora_parameters
 
 
 class _TimmViT(Protocol):
@@ -52,6 +58,10 @@ class _TimmViT(Protocol):
     def named_parameters(self) -> Iterator[tuple[str, nn.Parameter]]: ...
 
     def modules(self) -> Iterator[nn.Module]: ...
+
+    def named_modules(self) -> Iterator[tuple[str, nn.Module]]: ...
+
+    def get_submodule(self, target: str) -> nn.Module: ...
 
     def set_grad_checkpointing(self, enable: bool = True) -> None: ...
 
@@ -318,13 +328,14 @@ class DinoLinearProbe(nn.Module):
         ``stem`` is the patch-embedding convolution: the only pretrained weights
         a frozen backbone moves for the extra bands, because the NIR/nDSM
         filters appended to it start untrained. ``bitfit`` is the trainable
-        BitFit+ subset, present only when the builder unfroze it. ``blocks`` is
-        every parameter of the last blocks that fine-tuning unfroze whole,
-        present only when the builder did that; the BitFit+ subset inside those
-        blocks belongs to it, so a block's rate is set once. ``backbone`` is the
-        rest of the ViT, ``head`` the linear probe. Each parameter belongs to
-        exactly one group, so an optimizer built from these can never silently
-        drop one.
+        BitFit+ subset, present only when the builder unfroze it. ``lora`` is
+        the adapters installed by :func:`rsss.models.lora.apply_lora`, present
+        only for a LoRA recipe. ``blocks`` is every parameter of the last
+        blocks that fine-tuning unfroze whole, present only when the builder did
+        that; the BitFit+ subset inside those blocks belongs to it, so a block's
+        rate is set once. ``backbone`` is the rest of the ViT, ``head`` the
+        linear probe. Each parameter belongs to exactly one group, so an
+        optimizer built from these can never silently drop one.
         """
         stem = list(self.backbone.patch_embed.proj.parameters())
         blocks: list[nn.Parameter] = []
@@ -338,10 +349,17 @@ class DinoLinearProbe(nn.Module):
             for parameter in bitfit_parameters(self.backbone)
             if parameter.requires_grad and id(parameter) not in block_ids
         ]
-        owned = {id(parameter) for parameter in (*stem, *blocks, *bitfit)}
+        lora = [
+            parameter
+            for parameter in lora_parameters(self.backbone)
+            if parameter.requires_grad
+        ]
+        owned = {id(parameter) for parameter in (*stem, *blocks, *bitfit, *lora)}
         groups: dict[str, list[nn.Parameter]] = {}
         if bitfit:
             groups["bitfit"] = bitfit
+        if lora:
+            groups["lora"] = lora
         if blocks:
             groups["blocks"] = blocks
         groups["stem"] = stem
@@ -541,7 +559,7 @@ def build_dinov3_last_blocks(
         information, and the appended filters start at zero.
     unfreeze_blocks : int
         How many trailing blocks to train whole; 4 of the ViT-L's 24 is ~51 M
-        parameters, against 1.6 M for BitFit+.
+        parameters, against 0.3 M for BitFit+.
     grad_checkpointing : bool
         Recompute each block in the backward pass, keeping the probe's batch
         size affordable on a 32 GB V100. The frozen blocks recompute nothing,
@@ -569,6 +587,106 @@ def build_dinov3_last_blocks(
     )
     unfreeze_last_blocks(model.backbone, unfreeze_blocks)
     model.first_trainable_block = len(model.backbone.blocks) - unfreeze_blocks
+    if grad_checkpointing:
+        model.backbone.set_grad_checkpointing(True)
+    return model
+
+
+@register_model("dinov3_lora")
+def build_dinov3_lora(
+    model_name: str = DEFAULT_MODEL,
+    pretrained: bool = True,
+    in_channels: int = 5,
+    classes: int = 13,
+    freeze_backbone: bool = True,
+    train_stem: bool = True,
+    lora_rank: int = 16,
+    lora_alpha: float = 32.0,
+    lora_dropout: float = 0.0,
+    grad_checkpointing: bool = True,
+) -> DinoLinearProbe:
+    """Build a DINOv3 backbone with a linear head, adapted with LoRA.
+
+    Same architecture, head and stem handling as
+    :func:`build_dinov3_linear_probe`; the difference is that every attention
+    projection -- ``attn.qkv`` and ``attn.proj`` of all blocks -- gains a
+    trainable low-rank adapter while its pretrained weights stay frozen (see
+    :mod:`rsss.models.lora`). Token mixing therefore moves throughout the
+    depth, which BitFit+ never allows, for a few million parameters rather than
+    the fifty million of a four-block fine-tune. The adapters start at exactly
+    zero, so at initialisation the network is the frozen probe.
+
+    Parameters
+    ----------
+    model_name : str
+        timm model name, e.g. the SAT-493M ViT-L or a web-pretrained variant.
+    pretrained : bool
+        Load the pretrained weights. Tests and smoke runs pass False.
+    in_channels : int
+        Number of input bands, appended to the RGB stem as in the probe.
+    classes : int
+        Number of output classes.
+    freeze_backbone : bool
+        Must stay True: LoRA is defined as an adaptation of a frozen backbone,
+        and unfreezing everything is a different recipe.
+    train_stem : bool
+        Unfreeze ``patch_embed.proj`` so the NIR/nDSM filters can learn. True
+        by default because nothing else touches the stem, and those appended
+        filters start at zero.
+    lora_rank : int
+        Rank of the correction, 16 by default. The budget is
+        ``rank * (in + out)`` per adapted layer; the ViT-L's 48 attention
+        projections cost 2.36 M parameters at rank 16, 1.18 M at rank 8.
+    lora_alpha : float
+        Scale numerator of the correction. The adapter's contribution is
+        ``alpha / rank`` times ``B A x``; ``2 * rank`` keeps that magnitude
+        independent of the rank.
+    lora_dropout : float
+        Dropout on the correction's input, in ``[0, 1)``. Zero by default, as
+        a fresh zero-initialised adapter has nothing to overfit yet.
+    grad_checkpointing : bool
+        Recompute each block in the backward pass, keeping the probe's batch
+        size affordable on a 32 GB V100. Gradients now reach every block, so
+        this stays on by default.
+
+    Returns
+    -------
+    DinoLinearProbe
+        The network, returning raw logits at the input resolution.
+
+    Raises
+    ------
+    ValueError
+        If ``freeze_backbone`` is False, or an adapter setting is out of range.
+    """
+    if not freeze_backbone:
+        raise ValueError(
+            "dinov3_lora adapts a frozen backbone; freeze_backbone=False "
+            "already trains every parameter, so use dinov3_linear_probe to "
+            "fine-tune fully."
+        )
+    model = _build_probe(
+        model_name, pretrained, in_channels, classes, freeze_backbone, train_stem
+    )
+    # After _build_probe, never before: timm loads the pretrained weights into
+    # plain linears, and expand_patch_embed replaces the stem there.
+    adapters = apply_lora(
+        model.backbone,
+        rank=lora_rank,
+        alpha=lora_alpha,
+        dropout=lora_dropout,
+    )
+    adapted = sum(parameter.numel() for parameter in adapters)
+    total = sum(parameter.numel() for parameter in model.backbone.parameters())
+    logger.info(
+        "LoRA adapts {} layers at rank {}: {:,} adapter parameters, {:.2%} of "
+        "the {:,}-parameter backbone.",
+        len(adapters) // 2,
+        lora_rank,
+        adapted,
+        adapted / total,
+        total,
+    )
     if grad_checkpointing:
         model.backbone.set_grad_checkpointing(True)
     return model

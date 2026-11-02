@@ -16,9 +16,10 @@ from typing import Any, cast
 import pytest
 import timm
 import torch
+from torch import nn
 from torch.nn import functional as F
 
-from rsss.models import MODEL_REGISTRY, build_model
+from rsss.models import MODEL_REGISTRY, build_model, offline_model_config
 from rsss.models.dinov3 import (
     DEFAULT_MODEL,
     SAT_MEAN,
@@ -28,12 +29,14 @@ from rsss.models.dinov3 import (
     build_dinov3_bitfit,
     build_dinov3_last_blocks,
     build_dinov3_linear_probe,
+    build_dinov3_lora,
     dinov3_normalization,
     expand_patch_embed,
     last_block_parameters,
     unfreeze_bitfit,
     unfreeze_last_blocks,
 )
+from rsss.models.lora import LoRALinear, lora_modules, lora_parameters
 from rsss.training.config import load_train_config
 from rsss.training.module import SegmentationModule
 
@@ -77,6 +80,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 SHIPPED_CONFIG = REPO_ROOT / "configs" / "train_dinov3.yaml"
 SHIPPED_BITFIT_CONFIG = REPO_ROOT / "configs" / "train_dinov3_bitfit.yaml"
 SHIPPED_LAST_BLOCKS_CONFIG = REPO_ROOT / "configs" / "train_dinov3_last_blocks.yaml"
+SHIPPED_LORA_CONFIG = REPO_ROOT / "configs" / "train_dinov3_lora.yaml"
 
 
 def small_backbone() -> Any:
@@ -124,6 +128,21 @@ def small_last_blocks(**overrides) -> DinoLinearProbe:
     }
     kwargs.update(overrides)
     return cast(DinoLinearProbe, build_dinov3_last_blocks(**kwargs))
+
+
+def small_lora(**overrides) -> DinoLinearProbe:
+    """Return the LoRA model on the small backbone, offline and fast."""
+    kwargs = {
+        "model_name": SMALL_MODEL,
+        "pretrained": False,
+        "in_channels": 5,
+        "classes": CLASSES,
+        "grad_checkpointing": False,
+        "lora_rank": 4,
+        "lora_alpha": 8.0,
+    }
+    kwargs.update(overrides)
+    return cast(DinoLinearProbe, build_dinov3_lora(**kwargs))
 
 
 def expected_last_blocks_names(depth: int, num_blocks: int) -> set[str]:
@@ -605,6 +624,192 @@ def test_checkpointed_last_blocks_still_return_full_resolution_logits():
 
 
 # --------------------------------------------------------------------------- #
+# LoRA fine-tuning                                                            #
+# --------------------------------------------------------------------------- #
+
+
+def test_lora_is_registered():
+    assert "dinov3_lora" in MODEL_REGISTRY
+
+
+def test_lora_wraps_attention_in_every_block_and_leaves_the_mlp_alone():
+    net = small_lora()
+
+    wrapped = {
+        name
+        for name, module in net.backbone.named_modules()
+        if isinstance(module, LoRALinear)
+    }
+
+    assert wrapped == {
+        f"blocks.{index}.{suffix}"
+        for index in range(SMALL_DEPTH)
+        for suffix in ("attn.qkv", "attn.proj")
+    }
+    assert type(net.backbone.blocks[0].mlp.fc1) is nn.Linear
+    assert type(net.backbone.blocks[0].mlp.fc2) is nn.Linear
+    assert isinstance(net.backbone.patch_embed.proj, nn.Conv2d)
+
+
+def test_lora_freezes_every_pretrained_weight_of_the_backbone():
+    """Nothing but the adapters and the stem trains inside the backbone."""
+    net = small_lora()
+    allowed = {id(parameter) for parameter in lora_parameters(net.backbone)} | {
+        id(parameter) for parameter in net.backbone.patch_embed.proj.parameters()
+    }
+
+    assert all(parameter.requires_grad for parameter in lora_parameters(net.backbone))
+    assert not any(
+        parameter.requires_grad
+        for parameter in net.backbone.parameters()
+        if id(parameter) not in allowed
+    )
+    assert all(
+        parameter.requires_grad
+        for parameter in net.backbone.patch_embed.proj.parameters()
+    )
+
+
+def test_lora_starts_as_the_frozen_probe():
+    """B is zero, so the adapted network must compute the probe's own function."""
+    torch.manual_seed(0)
+    probe = small_probe()
+    torch.manual_seed(0)
+    lora = small_lora()
+    x = torch.randn(1, 5, SIZE, SIZE)
+
+    probe.eval()
+    lora.eval()
+    with torch.no_grad():
+        assert torch.allclose(lora(x), probe(x))
+
+
+def test_lora_adds_its_own_parameter_group():
+    net = small_lora()
+
+    groups = net.parameter_groups()
+
+    assert set(groups) == {"lora", "stem", "backbone", "head"}
+    assert {id(p) for p in groups["lora"]} == {
+        id(p) for p in lora_parameters(net.backbone) if p.requires_grad
+    }
+    assert not any(parameter.requires_grad for parameter in groups["backbone"])
+    listed = [
+        id(parameter) for parameters in groups.values() for parameter in parameters
+    ]
+    assert len(listed) == len(set(listed))
+    assert set(listed) == {id(parameter) for parameter in net.parameters()}
+
+
+def test_the_lora_group_is_optimized_at_its_own_rate():
+    module = SegmentationModule(
+        model={
+            "name": "dinov3_lora",
+            "model_name": SMALL_MODEL,
+            "pretrained": False,
+            "grad_checkpointing": False,
+            "lora_rank": 4,
+        },
+        num_classes=CLASSES,
+        optimizer={"lr": 1e-3, "lora_lr": 2e-3, "stem_lr": 1e-4},
+        scheduler={"warmup_epochs": 0, "t_max": 2},
+    )
+
+    optimizer = cast(Any, module.configure_optimizers())["optimizer"]
+
+    # Group order follows parameter_groups(): lora, stem, then the head.
+    assert [group["lr"] for group in optimizer.param_groups] == [2e-3, 1e-4, 1e-3]
+
+
+def test_lora_refuses_a_backbone_that_is_not_frozen():
+    with pytest.raises(ValueError, match="freeze_backbone=False"):
+        build_dinov3_lora(pretrained=False, freeze_backbone=False)
+
+
+def test_lora_enables_gradient_checkpointing_by_default():
+    net = cast(
+        DinoLinearProbe, build_dinov3_lora(model_name=SMALL_MODEL, pretrained=False)
+    )
+
+    assert net.backbone.grad_checkpointing is True
+    assert small_lora(grad_checkpointing=False).backbone.grad_checkpointing is False
+
+
+def test_checkpointed_lora_still_returns_full_resolution_logits():
+    net = small_lora(grad_checkpointing=True)
+
+    assert net(torch.randn(1, 5, SIZE, SIZE)).shape == (1, CLASSES, SIZE, SIZE)
+
+
+def test_lora_gradients_reach_the_first_and_last_block_through_the_adapters():
+    net = small_lora()
+    modules = lora_modules(net.backbone)
+
+    net(torch.randn(1, 5, SIZE, SIZE)).sum().backward()
+
+    for module in (modules[0], modules[-1]):
+        assert module.lora_A.grad is not None
+        assert module.lora_B.grad is not None
+        assert all(parameter.grad is None for parameter in module.base.parameters())
+
+
+def test_the_satellite_lora_parameter_budget_is_pinned():
+    """The ViT-L budget the recipe documents: 2,359,296 adapters of 3,684,365."""
+    net = cast(DinoLinearProbe, build_dinov3_lora(pretrained=False))
+
+    groups = net.parameter_groups()
+
+    assert sum(parameter.numel() for parameter in groups["lora"]) == 2_359_296
+    assert (
+        sum(
+            parameter.numel()
+            for parameter in net.parameters()
+            if parameter.requires_grad
+        )
+        == 3_684_365
+    )
+
+
+def test_a_lower_rank_halves_the_adapter_budget():
+    net = cast(DinoLinearProbe, build_dinov3_lora(pretrained=False, lora_rank=8))
+
+    assert (
+        sum(parameter.numel() for parameter in lora_parameters(net.backbone))
+        == 1_179_648
+    )
+
+
+def test_a_lora_checkpoint_reloads_through_the_offline_builder():
+    """What ``rsss.predict`` does: rebuild without downloading, then load."""
+    torch.manual_seed(0)
+    trained = small_lora()
+    x = torch.randn(1, 5, SIZE, SIZE)
+    trained.eval()
+
+    rebuilt = cast(
+        DinoLinearProbe,
+        build_model(
+            offline_model_config(
+                {
+                    "name": "dinov3_lora",
+                    "model_name": SMALL_MODEL,
+                    "pretrained": True,
+                    "classes": CLASSES,
+                    "grad_checkpointing": False,
+                    "lora_rank": 4,
+                    "lora_alpha": 8.0,
+                }
+            )
+        ),
+    )
+    rebuilt.load_state_dict(trained.state_dict())
+    rebuilt.eval()
+
+    with torch.no_grad():
+        assert torch.equal(rebuilt(x), trained(x))
+
+
+# --------------------------------------------------------------------------- #
 # Shipped recipe                                                              #
 # --------------------------------------------------------------------------- #
 
@@ -690,6 +895,41 @@ def test_the_last_blocks_recipe_outlasts_the_two_earlier_arms():
 
 def test_the_last_blocks_recipe_builds_and_segments():
     config = load_train_config(SHIPPED_LAST_BLOCKS_CONFIG)
+
+    net = build_model({**config.model, "pretrained": False, "classes": CLASSES})
+
+    assert isinstance(net, DinoLinearProbe)
+    assert net(torch.randn(1, 5, SIZE, SIZE)).shape == (1, CLASSES, SIZE, SIZE)
+
+
+def test_the_lora_recipe_shares_everything_but_what_it_trains():
+    """Same data, loss, schedule and budget as the probe; only the adaptation differs."""
+    probe = load_train_config(SHIPPED_CONFIG)
+    lora = load_train_config(SHIPPED_LORA_CONFIG)
+
+    assert lora.model["name"] == "dinov3_lora"
+    assert lora.model["model_name"] == probe.model["model_name"]
+    assert lora.model["in_channels"] == probe.model["in_channels"]
+    assert lora.model["train_stem"] is True
+    assert lora.model["grad_checkpointing"] is True
+    assert lora.model["lora_rank"] == 16
+    assert lora.model["lora_alpha"] == 32
+    assert lora.model["lora_dropout"] == 0.0
+    assert lora.num_classes == probe.num_classes
+    assert lora.loss == probe.loss
+    assert lora.scheduler == probe.scheduler
+    assert lora.trainer == probe.trainer
+    assert lora.datamodule == probe.datamodule
+
+    assert lora.optimizer is not None
+    assert probe.optimizer is not None
+    assert lora.optimizer["lora_lr"] == lora.optimizer["lr"]
+    for key in ("lr", "stem_lr", "weight_decay"):
+        assert lora.optimizer[key] == probe.optimizer[key]
+
+
+def test_the_lora_recipe_builds_and_segments():
+    config = load_train_config(SHIPPED_LORA_CONFIG)
 
     net = build_model({**config.model, "pretrained": False, "classes": CLASSES})
 
