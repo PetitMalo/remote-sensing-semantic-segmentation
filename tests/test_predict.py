@@ -19,6 +19,7 @@ import yaml
 
 from rsss.data.data_module import FlairDatamodule
 from rsss.predict import (
+    DEFAULT_SEED,
     TilePrediction,
     build_arg_parser,
     load_module,
@@ -27,6 +28,7 @@ from rsss.predict import (
     predict_tiles,
     read_metrics,
     run,
+    sample_tile_indices,
 )
 from rsss.training.config import TrainConfig
 from rsss.training.module import SegmentationModule
@@ -91,6 +93,7 @@ def test_parser_defaults_to_the_shipped_configs():
     assert args.data_config == "configs/data.yaml"
     assert args.output_dir == "outputs/predict"
     assert args.num_tiles == 4
+    assert args.seed == DEFAULT_SEED
     assert args.metrics is None
     assert args.device is None
 
@@ -163,6 +166,52 @@ def test_load_module_builds_the_probe_without_pretrained_weights(tmp_path):
 # --------------------------------------------------------------------------- #
 # Prediction                                                                  #
 # --------------------------------------------------------------------------- #
+
+
+def flair_paths(domains: tuple[str, ...], tiles_per_domain: int) -> list[str]:
+    """Return FLAIR-layout image paths, grouped by domain like a split CSV."""
+    return [
+        f"data/flair_1_aerial_test/{domain}/Z1_UU/img/IMG_{index:06d}.tif"
+        for domain in domains
+        for index in range(tiles_per_domain)
+    ]
+
+
+def test_sample_tile_indices_is_deterministic() -> None:
+    paths = flair_paths(("D001", "D002", "D003"), 4)
+
+    first = sample_tile_indices(paths, 3, seed=7)
+    second = sample_tile_indices(paths, 3, seed=7)
+
+    assert first == second
+
+
+def test_sample_tile_indices_spans_distinct_domains() -> None:
+    paths = flair_paths(("D001", "D002", "D003"), 4)
+
+    indices = sample_tile_indices(paths, 3, seed=0)
+
+    assert len(set(indices)) == 3
+    domains = {paths[index].split("/")[-4] for index in indices}
+    assert domains == {"D001", "D002", "D003"}
+
+
+def test_sample_tile_indices_returns_every_tile_when_asked_for_more() -> None:
+    paths = flair_paths(("D001", "D002"), 2)
+
+    indices = sample_tile_indices(paths, 99, seed=0)
+
+    assert sorted(indices) == list(range(len(paths)))
+
+
+def test_sample_tile_indices_rejects_non_positive_count() -> None:
+    with pytest.raises(ValueError, match="positive"):
+        sample_tile_indices(flair_paths(("D001",), 1), 0)
+
+
+def test_sample_tile_indices_rejects_an_empty_split() -> None:
+    with pytest.raises(ValueError, match="empty"):
+        sample_tile_indices([], 1)
 
 
 def test_predict_tiles_returns_one_entry_per_tile(tmp_path, write_flair_dataset):

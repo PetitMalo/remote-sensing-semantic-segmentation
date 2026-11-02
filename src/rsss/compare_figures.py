@@ -2,8 +2,9 @@
 
 ``rsss.compare`` ranks runs on their best-validation checkpoint, but a table of
 mIoU values says nothing about *where* the models disagree. This module loads
-the same checkpoint for each run, predicts a fixed set of test tiles, and draws
-them as one grid: raw RGB, ground truth, then one prediction column per run.
+the same checkpoint for each run, predicts the same random, domain-spread
+sample of test tiles, and draws them as one grid: raw RGB, ground truth, then
+one prediction column per run.
 
 The recipe a run was trained with is not stored in its ``hparams.yaml`` (only
 the model section is), so the data pipeline -- notably the per-backbone
@@ -25,12 +26,17 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 from loguru import logger
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 
 from rsss.data.config import DataConfig, load_data_config
 from rsss.data.data_loader import FitDataset
 from rsss.data.splits import build_flair_splits
-from rsss.predict import load_module, predict_tiles
+from rsss.predict import (
+    DEFAULT_SEED,
+    load_module,
+    predict_tiles,
+    sample_tile_indices,
+)
 from rsss.train import datamodule_from_config
 from rsss.training.config import TrainConfig, load_train_config
 from rsss.viz.classes import CLASS_COLORS, class_label
@@ -142,8 +148,9 @@ def read_reference_tiles(
     data_config: DataConfig,
     num_classes: int,
     num_tiles: int = DEFAULT_NUM_TILES,
+    seed: int = DEFAULT_SEED,
 ) -> list[ReferenceTile]:
-    """Read the first test tiles as raw RGB and label indices.
+    """Read a random, domain-spread sample of the test tiles.
 
     ``FitDataset`` owns the label encoding (MSK values 1..13 become indices
     0..12, and an out-of-range value becomes class 0), so reusing its readers
@@ -165,10 +172,11 @@ def read_reference_tiles(
     )
     if not len(dataset):
         raise ValueError(f"The test split at {data_config.dataset_dir} holds no tiles.")
+    indices = sample_tile_indices(list(dataset.list_imgs), num_tiles, seed)
     tiles: list[ReferenceTile] = []
-    for image_path, mask_path in zip(
-        dataset.list_imgs[:num_tiles], dataset.list_msks[:num_tiles], strict=True
-    ):
+    for index in indices:
+        image_path = dataset.list_imgs[index]
+        mask_path = dataset.list_msks[index]
         rgb = dataset.read_img(str(image_path))
         labels = dataset.read_msk(str(mask_path), start_one=True).argmax(axis=0)
         tiles.append(
@@ -187,11 +195,13 @@ def predict_run(
     data_config: DataConfig,
     tile_names: Sequence[str],
     device: str | None = None,
+    seed: int = DEFAULT_SEED,
 ) -> list[np.ndarray]:
     """Predict the reference tiles from one run's best checkpoint.
 
     ``tile_names`` guards the figure's premise: a run whose test split is
     ordered differently would otherwise be drawn beside the wrong ground truth.
+    The same seed picks the same indices as :func:`read_reference_tiles`.
     """
     if row.checkpoint is None:
         raise FileNotFoundError(f"{row.run} has no downloaded checkpoint.")
@@ -201,12 +211,15 @@ def predict_run(
     dataset = datamodule.test_dataset
     if dataset is None:
         raise RuntimeError(f"{row.run}: the recipe has no test dataset.")
-    found = [Path(str(path)).stem for path in dataset.list_imgs[: len(tile_names)]]
+    indices = sample_tile_indices(list(dataset.list_imgs), len(tile_names), seed)
+    found = [Path(str(dataset.list_imgs[index])).stem for index in indices]
     if found != list(tile_names):
         raise ValueError(
             f"{row.run}: test tiles {found} differ from the reference {tile_names}."
         )
-    loader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=0)
+    loader = DataLoader(
+        Subset(dataset, indices), batch_size=1, shuffle=False, num_workers=0
+    )
     predictions = predict_tiles(module, loader, len(tile_names))
     if len(predictions) != len(tile_names):
         raise ValueError(
@@ -298,6 +311,7 @@ def generate(
     data_config_path: str | Path = DEFAULT_DATA_CONFIG,
     data_dir: str | Path | None = None,
     num_tiles: int = DEFAULT_NUM_TILES,
+    seed: int = DEFAULT_SEED,
     device: str | None = None,
     output_dir: str | Path = ".",
 ) -> InferenceFigure | None:
@@ -322,13 +336,13 @@ def generate(
         return None
 
     num_classes = recipes[usable[0].recipe].num_classes
-    tiles = read_reference_tiles(data_config, num_classes, num_tiles)
+    tiles = read_reference_tiles(data_config, num_classes, num_tiles, seed)
     tile_names = [tile.name for tile in tiles]
     predictions: dict[str, list[np.ndarray]] = {}
     for row in usable:
         try:
             predictions[row.run] = predict_run(
-                row, recipes[row.recipe], data_config, tile_names, device
+                row, recipes[row.recipe], data_config, tile_names, device, seed
             )
         except (FileNotFoundError, RuntimeError, ValueError) as error:
             logger.warning("Skipping the inference column for {}: {}", row.run, error)

@@ -124,6 +124,29 @@ def write_data_config(path: Path, data_root: Path) -> Path:
     return path
 
 
+# Two tiles in each of three test domains, so a sample of three tiles can spread
+# over all of them.
+TEST_TILES = [
+    ("D012_2019", "Z1_UU", "000001"),
+    ("D012_2019", "Z1_UU", "000002"),
+    ("D013_2019", "Z1_UU", "000003"),
+    ("D013_2019", "Z1_UU", "000004"),
+    ("D014_2019", "Z1_UU", "000005"),
+    ("D014_2019", "Z1_UU", "000006"),
+]
+
+
+def write_multidomain_dataset(
+    tmp_path: Path, write_flair_dataset, write_flair_split
+) -> Path:
+    """Write a toy dataset whose test split holds three geographical domains."""
+    data_root = tmp_path / "data"
+    dataset_root = data_root / "flair_1_toy_dataset"
+    write_flair_dataset(dataset_root, size=TILE_SIZE)
+    write_flair_split(dataset_root, "test", TEST_TILES, size=TILE_SIZE)
+    return data_root
+
+
 def comparison_row(run: str = "run-01") -> RunComparison:
     """Return one hand-built comparison row for rendering tests."""
     return RunComparison(
@@ -188,6 +211,25 @@ def test_read_reference_tiles_returns_raw_rgb_and_label_indices(
     # The fixture's masks are all MSK value 1, i.e. class index 0.
     assert set(np.unique(tiles[0].target)) == {0}
     assert tiles[0].name == "IMG_061946"
+
+
+def test_read_reference_tiles_samples_across_test_domains(
+    tmp_path: Path, write_flair_dataset, write_flair_split
+) -> None:
+    data_root = write_multidomain_dataset(
+        tmp_path, write_flair_dataset, write_flair_split
+    )
+    domain_by_name = {f"IMG_{stem}": area for area, _, stem in TEST_TILES}
+
+    tiles = read_reference_tiles(
+        DataConfig(data_dir=data_root, dataset="flair_1_toy"),
+        NUM_CLASSES,
+        3,
+        seed=0,
+    )
+
+    assert len(tiles) == 3
+    assert len({domain_by_name[tile.name] for tile in tiles}) == 3
 
 
 def test_read_reference_tiles_maps_out_of_range_labels_to_class_zero(
@@ -373,4 +415,33 @@ def test_generate_reports_the_runs_it_drew(tmp_path: Path, write_flair_dataset) 
     assert figure is not None
     assert figure.runs == ("tiny-01",)
     assert figure.num_tiles == 1
+    assert figure.path.is_file()
+
+
+def test_generate_predicts_the_same_random_tiles_as_the_reference(
+    tmp_path: Path, write_flair_dataset, write_flair_split
+) -> None:
+    data_root = write_multidomain_dataset(
+        tmp_path, write_flair_dataset, write_flair_split
+    )
+    data_config = write_data_config(tmp_path / "data.yaml", data_root)
+    configs = tmp_path / "configs"
+    write_recipe(configs / "train.yaml", MODEL)
+    runs_root = tmp_path / "runs"
+    write_run(runs_root, MODEL)
+    [row] = build_rows(runs_root, read_checkpoints=False)
+
+    figure = generate(
+        [row],
+        configs_dir=configs,
+        data_config_path=data_config,
+        data_dir=data_root,
+        num_tiles=3,
+        seed=0,
+        device="cpu",
+        output_dir=tmp_path / "figures",
+    )
+
+    assert figure is not None
+    assert figure.num_tiles == 3
     assert figure.path.is_file()
