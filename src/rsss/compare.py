@@ -15,6 +15,9 @@ epoch's weights, and the ``eval/`` run is the one that scored the best epoch.
 Run it with ``uv run python -m rsss.compare`` (``-h`` for the options). It reads
 local artefacts only, so it runs on a laptop after
 ``scripts/pando/upload_run.sh`` and ``rclone copy`` have brought a run back.
+``--figures`` additionally loads each best checkpoint, predicts a fixed set of
+test tiles and embeds one comparison grid in the document; that step needs the
+dataset and matplotlib, so it is opt-in.
 """
 
 from __future__ import annotations
@@ -22,9 +25,10 @@ from __future__ import annotations
 import argparse
 import csv
 import math
+import os
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 import yaml
@@ -32,9 +36,15 @@ from loguru import logger
 
 from rsss.predict import read_metrics
 
+if TYPE_CHECKING:
+    from rsss.compare_figures import InferenceFigure
+
 DEFAULT_RUNS_ROOT = "outputs/pando"
 DEFAULT_MARKDOWN_NAME = "comparison.md"
 DEFAULT_CSV_NAME = "comparison.csv"
+DEFAULT_CONFIGS_DIR = "configs"
+DEFAULT_DATA_CONFIG = "configs/data_subset.yaml"
+DEFAULT_NUM_FIGURES = 3
 # The monitor ``rsss.train`` keeps its best checkpoint on.
 VALIDATION_COLUMN = "val/mIoU"
 # Columns of the CSVLogger rows this module reads.
@@ -404,8 +414,17 @@ def _baseline_name(rows: list[RunComparison]) -> str | None:
     return reference.run
 
 
-def render_markdown(rows: list[RunComparison]) -> str:
-    """Render the comparison as a Markdown document."""
+def render_markdown(
+    rows: list[RunComparison],
+    *,
+    figure: InferenceFigure | None = None,
+    figure_href: str | None = None,
+) -> str:
+    """Render the comparison as a Markdown document.
+
+    ``figure`` and ``figure_href`` are the inference grid and its path relative
+    to the Markdown file; passing neither leaves the document table-only.
+    """
     if not rows:
         return (
             "# Test-split comparison\n\n"
@@ -449,6 +468,23 @@ def render_markdown(rows: list[RunComparison]) -> str:
     for index in classes:
         cells = " | ".join(_format_value(row.test_iou.get(index)) for row in rows)
         lines.append(f"| class_{index} | {cells} |")
+
+    if figure is not None and figure_href is not None:
+        run_list = ", ".join(f"`{run}`" for run in figure.runs)
+        tiles = "tile" if figure.num_tiles == 1 else "tiles"
+        lines += [
+            "",
+            "## Inference on test tiles",
+            "",
+            (
+                f"{figure.num_tiles} test {tiles}, top to bottom, predicted by each "
+                f"run's best-validation checkpoint: {run_list}. Every model sees the "
+                "same tiles and the colours are the FLAIR#1 nomenclature of the "
+                "per-class table (`0` is `Building`)."
+            ),
+            "",
+            f"![Inference on test tiles]({figure_href})",
+        ]
 
     lines += ["", "## Provenance", ""]
     for row in rows:
@@ -535,11 +571,17 @@ def _csv_row(row: RunComparison, classes: list[int]) -> dict[str, Any]:
     return values
 
 
-def write_markdown(rows: list[RunComparison], path: str | Path) -> Path:
+def write_markdown(
+    rows: list[RunComparison],
+    path: str | Path,
+    *,
+    figure: InferenceFigure | None = None,
+    figure_href: str | None = None,
+) -> Path:
     """Write the comparison as a Markdown document."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(render_markdown(rows))
+    path.write_text(render_markdown(rows, figure=figure, figure_href=figure_href))
     return path
 
 
@@ -572,11 +614,52 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Skip the checkpoints, leaving the parameter counts blank.",
     )
+    parser.add_argument(
+        "--figures",
+        action="store_true",
+        help="Load each best checkpoint, predict a few test tiles and embed one "
+        "comparison grid in the Markdown (needs the dataset and matplotlib).",
+    )
+    parser.add_argument(
+        "--num-figures",
+        type=int,
+        default=DEFAULT_NUM_FIGURES,
+        help="Test tiles to draw when --figures is set (default: %(default)s).",
+    )
+    parser.add_argument(
+        "--configs-dir",
+        default=DEFAULT_CONFIGS_DIR,
+        help="Directory whose train*.yaml recipes recover each run's data "
+        "pipeline (default: %(default)s).",
+    )
+    parser.add_argument(
+        "--data-config",
+        default=DEFAULT_DATA_CONFIG,
+        help="Data source the runs were trained with (default: %(default)s).",
+    )
+    parser.add_argument(
+        "--data-dir",
+        default=None,
+        help="Override the data config's data_dir for --figures.",
+    )
+    parser.add_argument(
+        "--device",
+        default=None,
+        choices=["cpu", "cuda"],
+        help="Device to predict on for --figures (default: CUDA when available).",
+    )
     return parser
+
+
+def _figure_href(figure: InferenceFigure, markdown: Path) -> str:
+    """Return the figure path relative to the Markdown file, with slashes."""
+    return os.path.relpath(figure.path, markdown.parent).replace(os.sep, "/")
 
 
 def run(args: argparse.Namespace) -> tuple[Path, Path]:
     """Build the comparison and return the two written paths."""
+    if args.figures and args.no_params:
+        raise ValueError("--figures needs the checkpoints; drop --no-params.")
     rows = build_rows(
         args.runs_root,
         baseline=args.baseline,
@@ -585,7 +668,28 @@ def run(args: argparse.Namespace) -> tuple[Path, Path]:
     root = Path(args.runs_root)
     markdown = Path(args.output) if args.output else root / DEFAULT_MARKDOWN_NAME
     csv_path = Path(args.csv) if args.csv else root / DEFAULT_CSV_NAME
-    return write_markdown(rows, markdown), write_csv(rows, csv_path)
+    figure = None
+    if args.figures:
+        from rsss.compare_figures import generate
+
+        figure = generate(
+            rows,
+            configs_dir=args.configs_dir,
+            data_config_path=args.data_config,
+            data_dir=args.data_dir,
+            num_tiles=args.num_figures,
+            device=args.device,
+            output_dir=root / "figures",
+        )
+    return (
+        write_markdown(
+            rows,
+            markdown,
+            figure=figure,
+            figure_href=None if figure is None else _figure_href(figure, markdown),
+        ),
+        write_csv(rows, csv_path),
+    )
 
 
 def main(argv: list[str] | None = None) -> int:

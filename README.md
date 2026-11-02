@@ -191,6 +191,21 @@ Adam moments give the trainable-parameter count without rebuilding a model;
 recipe's run by default). Runs without an `eval/` test row are skipped, so a
 root may hold partially downloaded runs.
 
+Add `--figures` to also draw what the scores describe: it loads each run's
+best-validation checkpoint, predicts the first `--num-figures` test tiles
+(3 by default) and embeds one grid in `comparison.md` — raw RGB, ground truth,
+then one prediction column per run, all on the same tiles and colours.
+`--data-config` and `--data-dir` point it at the split the runs were trained on
+(the subset by default), and the recipes in `--configs-dir` recover each run's
+normalisation from its model name. The grid lands in `figures/inference.png`
+beside the document; this step needs the dataset and matplotlib, so it is meant
+for the laptop, not the cluster.
+
+```bash
+uv run python -m rsss.compare --runs-root outputs/pando --figures \
+    --data-config configs/data_subset.yaml --data-dir data
+```
+
 ## Run on PANDO
 
 PANDO's compute nodes have no outbound network, so stage the environment, the
