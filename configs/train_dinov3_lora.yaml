@@ -1,0 +1,81 @@
+# Training recipe for DINOv3 fine-tuned with LoRA.
+#
+# The fourth arm after configs/train_dinov3.yaml (frozen probe),
+# configs/train_dinov3_bitfit.yaml (BitFit+) and
+# configs/train_dinov3_last_blocks.yaml (last four blocks whole): same backbone,
+# same linear head, same stem handling, same loss, optimizer, schedule and data
+# pipeline. What changes is *how* the backbone adapts.
+#
+# model       : forwarded to rsss.models.build_model ("name" plus its kwargs).
+#               The backbone is timm's ViT-L/16 distilled on SAT-493M; the head
+#               is the 1x1 convolution of the DINOv3 linear probe. Besides the
+#               head and the patch-embedding stem, dinov3_lora trains a low-rank
+#               adapter beside every attention projection -- attn.qkv and
+#               attn.proj of all 24 blocks -- while the pretrained weights stay
+#               frozen: 2,359,296 adapter parameters at rank 16, ~0.8% of the
+#               backbone. Unlike BitFit+ it moves token mixing, and unlike
+#               last-blocks it does so throughout the depth rather than in the
+#               last four blocks.
+model:
+  name: dinov3_lora
+  model_name: vit_large_patch16_dinov3.sat493m
+  pretrained: true
+  in_channels: 5
+  # Rank of the correction and the numerator of its alpha/rank scale. 16 and
+  # 32 are the usual ViT defaults; rank 8 halves the adapter budget to 1.18 M
+  # if a first run shows the adaptation is not the bottleneck.
+  lora_rank: 16
+  lora_alpha: 32
+  # Dropout on the correction's input. Left at zero: the adapters start at
+  # exactly zero, so there is nothing to regularise before they have moved.
+  lora_dropout: 0.0
+  # Keep the 5-band input: nothing but the stem can teach the zero-initial
+  # NIR/nDSM filters, so it has to train.
+  train_stem: true
+  # Gradients now reach every block through the adapters. Recomputing each
+  # block keeps batch 8 affordable on a 32 GB V100; turn it off only after
+  # checking the memory, since the batch size must stay at the probe's for the
+  # comparison to hold.
+  grad_checkpointing: true
+
+num_classes: 13
+
+loss:
+  ce: 0.5
+  dice: 0.5
+
+optimizer:
+  # The head and the fresh adapters take the probe's rate: both are new
+  # parameters, and a difference from the probe should not come from the step
+  # size. `stem_lr` is unchanged from the three earlier arms. `lora_lr` sets
+  # the adapters' own rate; keep it at the head's unless a sweep says
+  # otherwise.
+  lr: 1.0e-3
+  lora_lr: 1.0e-3
+  stem_lr: 1.0e-4
+  weight_decay: 1.0e-4
+
+scheduler:
+  warmup_epochs: 1
+
+trainer:
+  # The probe's budget: only the adapters, the stem and the head are new, and
+  # the correction converges about as fast as the linear head it feeds.
+  max_epochs: 10
+  accelerator: auto
+  devices: 1
+  precision: 16-mixed
+  log_every_n_steps: 10
+
+datamodule:
+  # Same batch size as the probe: the frozen backbone still holds most of the
+  # memory, and the adapters add ~9 MB of parameters and gradients.
+  batch_size: 8
+  num_workers: 8
+  # DINOv3's SAT-493M statistics, in [0, 1] units and multiplied by 255 for the
+  # raw uint8 rasters: mean (0.430, 0.411, 0.296), std (0.213, 0.156, 0.143).
+  # SAT-493M is RGB-only, so NIR and nDSM keep FLAIR#1's official statistics --
+  # the stem standardizes on its own means, not on the backbone's.
+  norm_type: custom
+  means: [109.65, 104.805, 75.48, 106.38, 53.26]
+  stds: [54.315, 39.78, 36.465, 39.69, 79.3]

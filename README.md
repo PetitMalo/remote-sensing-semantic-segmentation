@@ -115,7 +115,7 @@ uv run python -m rsss.train --config configs/train_dinov3.yaml \
     --output-dir outputs/dinov3-probe-01
 ```
 
-Two fine-tuned arms sit between that probe and training the whole backbone,
+Three fine-tuned arms sit between that probe and training the whole backbone,
 differing only in which parameters move. `configs/train_dinov3_bitfit.yaml`
 adds every bias, every LayerNorm affine pair and every LayerScale vector
 (0.3 M parameters) but no token-mixing weight. `configs/train_dinov3_last_blocks.yaml`
@@ -131,6 +131,21 @@ a like-for-like comparison; a control at 10 epochs is the same command with
 uv run python -m rsss.train --config configs/train_dinov3_last_blocks.yaml \
     --data-config configs/data_subset.yaml --data-dir data \
     --output-dir outputs/dinov3-last-blocks-01
+```
+
+`configs/train_dinov3_lora.yaml` takes the other route to moving token mixing:
+a low-rank adapter beside every attention projection (`attn.qkv` and
+`attn.proj` of all 24 blocks), 2.36 M parameters at rank 16, learned at the
+head's 1e-3 (`lora_lr`) while the pretrained weights stay frozen. Unlike
+last-blocks it adapts the whole depth, and unlike BitFit+ its adapters sit
+inside the attention weights; the correction is zero at initialisation, so the
+run starts from exactly the probe's function. It keeps the probe's 10-epoch
+budget, so the four arms stay comparable:
+
+```bash
+uv run python -m rsss.train --config configs/train_dinov3_lora.yaml \
+    --data-config configs/data_subset.yaml --data-dir data \
+    --output-dir outputs/dinov3-lora-01
 ```
 
 Logs and checkpoints land under `--output-dir` (default `outputs/`). A run keeps
@@ -256,9 +271,11 @@ DATA_DIR=$HOME/rsss-data RUN_DIR=$HOME/rsss-runs/unet-subset-01 \
 DATA_DIR=$HOME/rsss-data RUN_DIR=$HOME/rsss-runs/dinov3-probe-01 \
     TRAIN_CONFIG=configs/train_dinov3.yaml sbatch scripts/pando/job.sh
 
-# The BitFit+ and last-blocks arms read the same staged SAT-493M weights.
+# The BitFit+, last-blocks and LoRA arms read the same staged SAT-493M weights.
 DATA_DIR=$HOME/rsss-data RUN_DIR=$HOME/rsss-runs/dinov3-last-blocks-01 \
     TRAIN_CONFIG=configs/train_dinov3_last_blocks.yaml sbatch scripts/pando/job.sh
+DATA_DIR=$HOME/rsss-data RUN_DIR=$HOME/rsss-runs/dinov3-lora-01 \
+    TRAIN_CONFIG=configs/train_dinov3_lora.yaml sbatch scripts/pando/job.sh
 ```
 
 `scripts/pando/job.sh` runs the U-Net baseline for 30 epochs over the FLAIR#1
