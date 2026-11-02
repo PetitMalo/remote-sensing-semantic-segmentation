@@ -1,7 +1,7 @@
 """Predict the test split from a training checkpoint and plot the results.
 
 This is a local analysis step: it loads a checkpoint written by ``rsss.train``,
-runs the model over the test tiles of a configured FLAIR#1 dataset, draws one
+runs the model over a random, domain-spread sample of the test tiles, draws one
 grid of image / ground truth / prediction, and, when given a ``metrics.csv``,
 draws the training curves and the per-class IoU.
 
@@ -22,13 +22,16 @@ from __future__ import annotations
 import argparse
 import csv
 import math
+import random
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 
+from rsss.data.subset import domain_of
 from rsss.models import offline_model_config
 from rsss.train import build_datamodule
 from rsss.training.config import TrainConfig, load_train_config
@@ -38,6 +41,7 @@ DEFAULT_TRAIN_CONFIG = "configs/train.yaml"
 DEFAULT_DATA_CONFIG = "configs/data.yaml"
 DEFAULT_OUTPUT_DIR = "outputs/predict"
 DEFAULT_NUM_TILES = 4
+DEFAULT_SEED = 0
 # Columns of ``metrics.csv`` the results figure draws.
 LOSS_COLUMNS = ("train/loss_epoch", "val/loss")
 MIOU_COLUMNS = ("val/mIoU", "test/mIoU")
@@ -108,13 +112,73 @@ def load_module(
     return module.to(device or default_device())
 
 
+def sample_tile_indices(
+    image_paths: Sequence[str | Path],
+    num_tiles: int = DEFAULT_NUM_TILES,
+    seed: int = DEFAULT_SEED,
+) -> list[int]:
+    """Pick random tile indices spread across the test split's domains.
+
+    The FLAIR path CSVs group tiles by domain, so the leading rows are all in
+    one geographical area. Shuffling the domains and taking one tile per domain
+    round-robin spreads a few tiles over several areas.
+
+    Parameters
+    ----------
+    image_paths : Sequence[str | Path]
+        Image paths of the test split, in dataset order.
+    num_tiles : int
+        How many tiles to pick; above the dataset size, every tile is used.
+    seed : int
+        Seed of the selection, so reruns and comparison columns agree.
+
+    Returns
+    -------
+    list[int]
+        Distinct indices into ``image_paths``, in sampled order.
+
+    Raises
+    ------
+    ValueError
+        If ``num_tiles`` is not positive or the split holds no tiles.
+    """
+    if num_tiles < 1:
+        raise ValueError(f"num_tiles must be positive, got {num_tiles}.")
+    if not image_paths:
+        raise ValueError("No tiles to sample; the test split is empty.")
+
+    by_domain: dict[str, list[int]] = {}
+    for index, path in enumerate(image_paths):
+        by_domain.setdefault(domain_of(path), []).append(index)
+
+    rng = random.Random(seed)
+    domains = sorted(by_domain)
+    rng.shuffle(domains)
+    for indices in by_domain.values():
+        rng.shuffle(indices)
+
+    limit = min(num_tiles, len(image_paths))
+    cursors = dict.fromkeys(domains, 0)
+    sampled: list[int] = []
+    while len(sampled) < limit:
+        for domain in domains:
+            if len(sampled) >= limit:
+                break
+            indices = by_domain[domain]
+            cursor = cursors[domain]
+            if cursor < len(indices):
+                sampled.append(indices[cursor])
+                cursors[domain] = cursor + 1
+    return sampled
+
+
 @torch.no_grad()
 def predict_tiles(
     module: SegmentationModule,
     dataloader: DataLoader,
     num_tiles: int = DEFAULT_NUM_TILES,
 ) -> list[TilePrediction]:
-    """Predict the first ``num_tiles`` tiles of ``dataloader``.
+    """Predict up to ``num_tiles`` tiles from ``dataloader``.
 
     Parameters
     ----------
@@ -328,6 +392,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="How many test tiles to draw (default: %(default)s).",
     )
     parser.add_argument(
+        "--seed",
+        type=int,
+        default=DEFAULT_SEED,
+        help="Seed of the random tile selection (default: %(default)s).",
+    )
+    parser.add_argument(
         "--metrics",
         default=None,
         help="A metrics.csv or the run's csv directory, to draw the results figure.",
@@ -349,10 +419,12 @@ def run(args: argparse.Namespace) -> Path:
     datamodule.setup("test")
     if datamodule.test_dataset is None:
         raise RuntimeError("The datamodule has no test split after setup('test').")
+    dataset = datamodule.test_dataset
+    indices = sample_tile_indices(list(dataset.list_imgs), args.num_tiles, args.seed)
     # One tile per batch and no workers: visualising a few tiles does not need
     # the recipe's throughput settings.
     loader = DataLoader(
-        datamodule.test_dataset, batch_size=1, shuffle=False, num_workers=0
+        Subset(dataset, indices), batch_size=1, shuffle=False, num_workers=0
     )
     tiles = predict_tiles(module, loader, args.num_tiles)
 

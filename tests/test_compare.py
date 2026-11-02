@@ -407,6 +407,7 @@ def test_build_arg_parser_defaults() -> None:
     assert args.no_params is False
     assert args.figures is False
     assert args.num_figures == 3
+    assert args.seed == 0
     assert args.configs_dir == "configs"
     assert args.data_config == "configs/data_subset.yaml"
     assert args.data_dir is None

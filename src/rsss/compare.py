@@ -15,9 +15,9 @@ epoch's weights, and the ``eval/`` run is the one that scored the best epoch.
 Run it with ``uv run python -m rsss.compare`` (``-h`` for the options). It reads
 local artefacts only, so it runs on a laptop after
 ``scripts/pando/upload_run.sh`` and ``rclone copy`` have brought a run back.
-``--figures`` additionally loads each best checkpoint, predicts a fixed set of
-test tiles and embeds one comparison grid in the document; that step needs the
-dataset and matplotlib, so it is opt-in.
+``--figures`` additionally loads each best checkpoint, predicts a random,
+domain-spread sample of test tiles and embeds one comparison grid in the
+document; that step needs the dataset and matplotlib, so it is opt-in.
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ import torch
 import yaml
 from loguru import logger
 
-from rsss.predict import read_metrics
+from rsss.predict import DEFAULT_SEED, read_metrics
 
 if TYPE_CHECKING:
     from rsss.compare_figures import InferenceFigure
@@ -617,14 +617,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--figures",
         action="store_true",
-        help="Load each best checkpoint, predict a few test tiles and embed one "
-        "comparison grid in the Markdown (needs the dataset and matplotlib).",
+        help="Load each best checkpoint, predict a random sample of test tiles "
+        "and embed one comparison grid in the Markdown (needs the dataset and "
+        "matplotlib).",
     )
     parser.add_argument(
         "--num-figures",
         type=int,
         default=DEFAULT_NUM_FIGURES,
         help="Test tiles to draw when --figures is set (default: %(default)s).",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=DEFAULT_SEED,
+        help="Seed of the random tile selection for --figures (default: %(default)s).",
     )
     parser.add_argument(
         "--configs-dir",
@@ -678,6 +685,7 @@ def run(args: argparse.Namespace) -> tuple[Path, Path]:
             data_config_path=args.data_config,
             data_dir=args.data_dir,
             num_tiles=args.num_figures,
+            seed=args.seed,
             device=args.device,
             output_dir=root / "figures",
         )
