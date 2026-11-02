@@ -4,8 +4,11 @@ Run it with ``uv run python -m rsss.train`` (``-h`` for the options). The
 architecture, the recipe and the data source come from ``configs/train.yaml``
 and ``configs/data.yaml``; the flags only override what has to change per run:
 the dataset location and the output directory on a cluster, or a quick smoke
-fit. A fit is followed by an evaluation on the test split, whose per-class IoU
-is reported alongside the validation metrics; ``--skip-test`` turns that off.
+fit. A fit is followed by an evaluation on the test split, scored on the
+best-validation checkpoint rather than the last epoch's weights, whose
+per-class IoU is reported alongside the validation metrics; ``--skip-test``
+turns that off. ``--test-checkpoint`` scores an existing checkpoint on the test
+split without training, which is how runs are compared on equal footing.
 ``--resume`` continues a fit from ``<output-dir>/checkpoints/last.ckpt``.
 Example: ``uv run python -m rsss.train --fast-dev-run --output-dir
 /scratch/me/runs/smoke``.
@@ -84,6 +87,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Skip the test-split evaluation that follows a fit.",
     )
     parser.add_argument(
+        "--test-checkpoint",
+        default=None,
+        metavar="CHECKPOINT",
+        help="Skip training and score CHECKPOINT on the test split.",
+    )
+    parser.add_argument(
         "--seed",
         type=int,
         default=None,
@@ -130,6 +139,35 @@ def resolve_resume_checkpoint(args: argparse.Namespace) -> Path | None:
         raise FileNotFoundError(
             f"No checkpoint to resume from at {checkpoint}. Run without "
             "--resume first, or pass a checkpoint that exists."
+        )
+    return checkpoint
+
+
+def resolve_test_checkpoint(args: argparse.Namespace) -> Path | None:
+    """Return the checkpoint ``--test-checkpoint`` names, or None to train.
+
+    Parameters
+    ----------
+    args : argparse.Namespace
+        Parsed entry-point arguments.
+
+    Returns
+    -------
+    Path | None
+        The checkpoint to pass to ``Trainer.test``, or None for a normal fit.
+
+    Raises
+    ------
+    FileNotFoundError
+        If the requested checkpoint does not exist.
+    """
+    if args.test_checkpoint is None:
+        return None
+    checkpoint = Path(args.test_checkpoint)
+    if not checkpoint.is_file():
+        raise FileNotFoundError(
+            f"No checkpoint to test at {checkpoint}. Pass a .ckpt written by "
+            "rsss.train, or leave --test-checkpoint out to fit a model."
         )
     return checkpoint
 
@@ -209,33 +247,80 @@ def build_checkpoint_callbacks(output_dir: str | Path) -> list[Callback]:
     ]
 
 
-def build_trainer(config: TrainConfig, args: argparse.Namespace) -> pl.Trainer:
-    """Build the Trainer, logging and checkpointing under ``--output-dir``."""
+def best_checkpoint_path(trainer: pl.Trainer) -> str | None:
+    """Return the best-validation checkpoint the trainer wrote, or None.
+
+    ``build_checkpoint_callbacks`` returns two callbacks: the first monitors
+    ``val/mIoU`` and keeps the best epoch, the second only keeps ``last.ckpt``.
+    Reading the monitored callback's path is more explicit than Lightning's
+    ``ckpt_path="best"``, which warns when several callbacks are configured and
+    raises when none wrote a file (``--fast-dev-run``).
+    """
+    for callback in trainer.checkpoint_callbacks:
+        if (
+            isinstance(callback, ModelCheckpoint)
+            and callback.monitor == CHECKPOINT_MONITOR
+            and callback.best_model_path
+        ):
+            return callback.best_model_path
+    return None
+
+
+def build_trainer(
+    config: TrainConfig, args: argparse.Namespace, *, checkpointing: bool = True
+) -> pl.Trainer:
+    """Build the Trainer, logging and checkpointing under ``--output-dir``.
+
+    ``checkpointing=False`` is for ``--test-checkpoint``: a test-only run writes
+    no checkpoint, and restoring a fit's callback state into a second run
+    directory would only warn about the changed ``dirpath``.
+    """
     output_dir = Path(args.output_dir)
+    callbacks = build_checkpoint_callbacks(output_dir) if checkpointing else []
     return pl.Trainer(
         **_trainer_kwargs(config, args),
         logger=CSVLogger(save_dir=str(output_dir), name="csv"),
-        callbacks=build_checkpoint_callbacks(output_dir),
+        callbacks=callbacks,
+        enable_checkpointing=checkpointing,
     )
 
 
 def run(args: argparse.Namespace) -> pl.Trainer:
     """Fit the configured model, evaluate it, and return the Trainer that ran it.
 
-    The test split is scored right after the fit, on the weights the last epoch
-    left, unless ``--skip-test`` is given. Returning the Trainer keeps the run
-    inspectable from a caller (and from the tests), instead of hiding the run
-    behind the exit code. With ``--resume`` the fit continues from a checkpoint,
-    which is how a run longer than one Slurm allocation finishes.
+    The test split is scored right after the fit, on the best-validation
+    checkpoint rather than the weights the last epoch left, unless
+    ``--skip-test`` is given. ``--test-checkpoint`` skips the fit and scores the
+    named checkpoint instead, so runs can be compared on their best epoch.
+    Returning the Trainer keeps the run inspectable from a caller (and from the
+    tests), instead of hiding the run behind the exit code. With ``--resume`` the
+    fit continues from a checkpoint, which is how a run longer than one Slurm
+    allocation finishes.
     """
     if args.fast_dev_run and args.resume is not None:
         raise ValueError("--fast-dev-run and --resume are mutually exclusive.")
+    if args.test_checkpoint is not None and (
+        args.resume is not None or args.fast_dev_run or args.skip_test
+    ):
+        raise ValueError(
+            "--test-checkpoint cannot be combined with --resume, "
+            "--fast-dev-run or --skip-test."
+        )
     seed_everything(args.seed)
-    checkpoint = resolve_resume_checkpoint(args)
+    test_checkpoint = resolve_test_checkpoint(args)
     config = load_train_config(args.config)
     datamodule = build_datamodule(config, args)
     module = build_module(config)
-    trainer = build_trainer(config, args)
+    trainer = build_trainer(config, args, checkpointing=test_checkpoint is None)
+    if test_checkpoint is not None:
+        logger.info(
+            "Scoring checkpoint {} on the test split; output under {}.",
+            test_checkpoint,
+            args.output_dir,
+        )
+        trainer.test(module, datamodule=datamodule, ckpt_path=test_checkpoint)
+        return trainer
+    checkpoint = resolve_resume_checkpoint(args)
     logger.info(
         "Training {} on {} classes; output under {}.",
         config.model["name"],
@@ -244,7 +329,17 @@ def run(args: argparse.Namespace) -> pl.Trainer:
     )
     trainer.fit(module, datamodule=datamodule, ckpt_path=checkpoint)
     if not args.skip_test:
-        trainer.test(module, datamodule=datamodule)
+        best = best_checkpoint_path(trainer)
+        if best is None:
+            logger.warning(
+                "No best-validation checkpoint was written; scoring the final "
+                "epoch's weights on the test split."
+            )
+        else:
+            logger.info(
+                "Scoring the best-validation checkpoint {} on the test split.", best
+            )
+        trainer.test(module, datamodule=datamodule, ckpt_path=best)
     return trainer
 
 

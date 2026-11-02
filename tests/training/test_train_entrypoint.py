@@ -9,6 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import pytorch_lightning as pl
 import torch
 import yaml
 from pytorch_lightning.callbacks import ModelCheckpoint
@@ -18,6 +19,7 @@ from rsss.data.download import TOY_DATASET
 from rsss.models import register_model
 from rsss.train import (
     CHECKPOINT_MONITOR,
+    best_checkpoint_path,
     build_arg_parser,
     build_checkpoint_callbacks,
     build_datamodule,
@@ -25,6 +27,7 @@ from rsss.train import (
     build_trainer,
     main,
     resolve_resume_checkpoint,
+    resolve_test_checkpoint,
     run,
     seed_everything,
 )
@@ -70,6 +73,7 @@ def test_parser_defaults_to_the_shipped_configs():
     assert args.limit_train_batches is None
     assert args.fast_dev_run is False
     assert args.skip_test is False
+    assert args.test_checkpoint is None
     assert args.seed is None
     assert args.resume is None
 
@@ -91,6 +95,8 @@ def test_parser_reads_every_override():
             "5",
             "--fast-dev-run",
             "--skip-test",
+            "--test-checkpoint",
+            "epoch=3-step=42.ckpt",
             "--seed",
             "7",
             "--resume",
@@ -106,6 +112,7 @@ def test_parser_reads_every_override():
     assert args.limit_train_batches == 5
     assert args.fast_dev_run is True
     assert args.skip_test is True
+    assert args.test_checkpoint == "epoch=3-step=42.ckpt"
     assert args.seed == 7
     assert args.resume == "last"
 
@@ -138,9 +145,35 @@ def test_resume_rejects_a_missing_checkpoint(tmp_path):
         )
 
 
+def test_test_checkpoint_accepts_an_existing_checkpoint(tmp_path):
+    checkpoint = tmp_path / "epoch-3.ckpt"
+    checkpoint.write_bytes(b"state")
+
+    resolved = resolve_test_checkpoint(parse(["--test-checkpoint", str(checkpoint)]))
+
+    assert resolved == checkpoint
+
+
+def test_test_checkpoint_is_none_without_the_flag():
+    assert resolve_test_checkpoint(parse([])) is None
+
+
+def test_test_checkpoint_rejects_a_missing_checkpoint(tmp_path):
+    with pytest.raises(FileNotFoundError, match="No checkpoint to test"):
+        resolve_test_checkpoint(
+            parse(["--test-checkpoint", str(tmp_path / "missing.ckpt")])
+        )
+
+
 def test_fast_dev_run_and_resume_are_mutually_exclusive():
     with pytest.raises(ValueError, match="mutually exclusive"):
         run(parse(["--fast-dev-run", "--resume"]))
+
+
+@pytest.mark.parametrize("extra", [["--resume"], ["--fast-dev-run"], ["--skip-test"]])
+def test_test_checkpoint_is_mutually_exclusive_with_training_flags(extra):
+    with pytest.raises(ValueError, match="test-checkpoint"):
+        run(parse(["--test-checkpoint", "unused.ckpt", *extra]))
 
 
 # --------------------------------------------------------------------------- #
@@ -238,7 +271,9 @@ def test_run_seeds_before_building_the_module(monkeypatch):
     monkeypatch.setattr(
         "rsss.train.build_module", lambda config: calls.append("module")
     )
-    monkeypatch.setattr("rsss.train.build_trainer", lambda config, args: _StubTrainer())
+    monkeypatch.setattr(
+        "rsss.train.build_trainer", lambda config, args, **kwargs: _StubTrainer()
+    )
 
     run(parse(["--seed", "3", "--skip-test"]))
 
@@ -264,6 +299,16 @@ def test_trainer_honours_the_recipe_and_the_flags(tmp_path):
     assert trainer.limit_train_batches == 5
 
 
+def test_build_trainer_can_skip_checkpointing(tmp_path):
+    config = TrainConfig(model=TINY_MODEL, num_classes=3)
+    args = parse(["--output-dir", str(tmp_path)])
+
+    trainer = build_trainer(config, args, checkpointing=False)
+
+    assert trainer.checkpoint_callbacks == []
+    assert trainer.checkpoint_callback is None
+
+
 def test_checkpoint_callbacks_keep_only_best_and_last(tmp_path):
     best, last = build_checkpoint_callbacks(tmp_path)
     assert isinstance(best, ModelCheckpoint)
@@ -284,6 +329,22 @@ def test_checkpoint_callbacks_keep_only_best_and_last(tmp_path):
     assert Path(str(best.dirpath)) == tmp_path / "checkpoints"
     assert best._save_on_train_epoch_end is False
     assert last._save_on_train_epoch_end is False
+
+
+def test_best_checkpoint_path_returns_the_monitored_checkpoint(tmp_path):
+    best, last = build_checkpoint_callbacks(tmp_path)
+    assert isinstance(best, ModelCheckpoint)
+    trainer = pl.Trainer(callbacks=[best, last], logger=False)
+    best.best_model_path = str(tmp_path / "epoch=3-step=42.ckpt")
+
+    assert best_checkpoint_path(trainer) == best.best_model_path
+
+
+def test_best_checkpoint_path_is_none_without_a_best_checkpoint(tmp_path):
+    best, last = build_checkpoint_callbacks(tmp_path)
+    trainer = pl.Trainer(callbacks=[best, last], logger=False)
+
+    assert best_checkpoint_path(trainer) is None
 
 
 # --------------------------------------------------------------------------- #
@@ -379,6 +440,46 @@ def test_run_scores_the_test_split_after_the_fit(smoke_argv):
     trainer = run(parse(smoke_argv))
 
     assert "test/mIoU" in trainer.callback_metrics
+
+
+@pytest.mark.filterwarnings("ignore:.*does not have many workers")
+@pytest.mark.filterwarnings("ignore:.*compute.*called before the.*update")
+def test_run_scores_the_best_validation_checkpoint(smoke_argv, monkeypatch):
+    seen: dict[str, object] = {}
+    original_test = pl.Trainer.test
+
+    def spy(self, *args, **kwargs):
+        seen["ckpt_path"] = kwargs.get("ckpt_path")
+        return original_test(self, *args, **kwargs)
+
+    monkeypatch.setattr(pl.Trainer, "test", spy)
+
+    trainer = run(parse(smoke_argv))
+
+    best = best_checkpoint_path(trainer)
+    assert best
+    assert seen["ckpt_path"] == best
+
+
+@pytest.mark.filterwarnings("ignore:.*does not have many workers")
+@pytest.mark.filterwarnings("ignore:.*compute.*called before the.*update")
+def test_test_checkpoint_scores_without_fitting(smoke_argv, tmp_path):
+    fitted = run(parse([*smoke_argv, "--skip-test"]))
+    best = best_checkpoint_path(fitted)
+    assert best
+
+    eval_dir = tmp_path / "eval"
+    trainer = run(
+        parse([*smoke_argv, "--output-dir", str(eval_dir), "--test-checkpoint", best])
+    )
+
+    assert "test/mIoU" in trainer.callback_metrics
+    logged = "\n".join(
+        path.read_text() for path in (eval_dir / "csv").rglob("metrics.csv")
+    )
+    assert "test/mIoU" in logged
+    assert "train/loss" not in logged
+    assert not list((eval_dir / "checkpoints").glob("*.ckpt"))
 
 
 @pytest.mark.filterwarnings("ignore:.*does not have many workers")

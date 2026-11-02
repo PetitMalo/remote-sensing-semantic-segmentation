@@ -12,8 +12,9 @@
 #
 # Training run on PANDO over the FLAIR#1 subset: whole spatial domains,
 # alphabetically first per split (5,275 train / 3,550 val / 2,250 test tiles,
-# 512x512, 5 bands, 13.6 GiB), then an evaluation on the test split. It reports
-# per-class IoU in the log and writes the metrics and checkpoints under RUN_DIR.
+# 512x512, 5 bands, 13.6 GiB), then scores the best-validation checkpoint on the
+# test split. It reports per-class IoU in the log and writes the metrics and
+# checkpoints under RUN_DIR.
 # The subset exists because PANDO's session cannot hold the full tree (95 GiB
 # extracted, ~146 GiB free at peak).
 #
@@ -66,6 +67,12 @@
 #   DATA_DIR=/scratch/me/rsss-data RUN_DIR=/scratch/me/rsss-runs/unet-01 \
 #       RESUME=last sbatch scripts/pando/job.sh
 #
+# Score an existing checkpoint on the test split without training, e.g. the best
+# one of an earlier run (its filename holds the epoch and step):
+#   DATA_DIR=/scratch/me/rsss-data RUN_DIR=/scratch/me/rsss-runs/unet-01-eval \
+#       TEST_CHECKPOINT=/scratch/me/rsss-runs/unet-01/checkpoints/epoch=21-step=28996.ckpt \
+#       sbatch scripts/pando/job.sh
+#
 # Override the defaults with the environment:
 #   DATA_DIR=/scratch/me/data RUN_DIR=/scratch/me/runs EPOCHS=2 sbatch scripts/pando/job.sh
 # A full-dataset run, where the quota allows it, selects the full config:
@@ -101,6 +108,10 @@ EPOCHS="${EPOCHS:-}"
 # Resume from "last" (or an explicit checkpoint) to finish a run across
 # allocations; leave empty for a fresh fit.
 RESUME="${RESUME:-}"
+# Score this checkpoint on the test split instead of training; leave empty for a
+# normal fit. Point RUN_DIR at a fresh directory so the eval CSV does not mix
+# with the run's own metrics.
+TEST_CHECKPOINT="${TEST_CHECKPOINT:-}"
 # U-Net encoder whose cached ImageNet weights the model build reads (smp's
 # `encoder_name`).
 ENCODER="${ENCODER:-resnet34}"
@@ -162,8 +173,11 @@ fi
 if [ -n "$EPOCHS" ]; then
     EXTRA_ARGS+=(--max-epochs "$EPOCHS")
 fi
+if [ -n "$TEST_CHECKPOINT" ]; then
+    EXTRA_ARGS+=(--test-checkpoint "$TEST_CHECKPOINT")
+fi
 
-echo "Job ${SLURM_JOB_ID:-local} on $(hostname); config=$TRAIN_CONFIG dataset=$DATASET data=$DATA_DIR runs=$RUN_DIR epochs=${EPOCHS:-recipe} resume=${RESUME:-no}"
+echo "Job ${SLURM_JOB_ID:-local} on $(hostname); config=$TRAIN_CONFIG dataset=$DATASET data=$DATA_DIR runs=$RUN_DIR epochs=${EPOCHS:-recipe} resume=${RESUME:-no} test=${TEST_CHECKPOINT:-no}"
 # Guard the optional-array expansion: PANDO's bash 4.2 treats an empty
 # "${EXTRA_ARGS[@]}" as an unbound variable under `set -u` (fixed in 4.4).
 uv run "${UV_GROUP_ARGS[@]}" --no-sync python -m rsss.train \
