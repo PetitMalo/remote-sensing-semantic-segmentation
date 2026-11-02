@@ -26,7 +26,7 @@ from loguru import logger
 from pytorch_lightning.callbacks import Callback, ModelCheckpoint
 from pytorch_lightning.loggers import CSVLogger
 
-from rsss.data.config import load_data_config
+from rsss.data.config import DataConfig, load_data_config
 from rsss.data.data_module import FlairDatamodule
 from rsss.training.config import TrainConfig, load_train_config
 from rsss.training.module import SegmentationModule
@@ -178,16 +178,23 @@ def seed_everything(seed: int | None) -> None:
         pl.seed_everything(seed, workers=True)
 
 
-def build_datamodule(config: TrainConfig, args: argparse.Namespace) -> FlairDatamodule:
-    """Build the data module from the data config and the recipe's settings."""
-    data_config = load_data_config(args.data_config)
-    if args.data_dir is not None:
-        data_config = dataclasses.replace(data_config, data_dir=Path(args.data_dir))
+def datamodule_from_config(
+    config: TrainConfig, data_config: DataConfig
+) -> FlairDatamodule:
+    """Build the data module from a recipe and a resolved data config."""
     return FlairDatamodule(
         config=data_config,
         num_classes=config.num_classes,
         **dict(config.datamodule),
     )
+
+
+def build_datamodule(config: TrainConfig, args: argparse.Namespace) -> FlairDatamodule:
+    """Build the data module from the data config and the recipe's settings."""
+    data_config = load_data_config(args.data_config)
+    if args.data_dir is not None:
+        data_config = dataclasses.replace(data_config, data_dir=Path(args.data_dir))
+    return datamodule_from_config(config, data_config)
 
 
 def build_module(config: TrainConfig) -> SegmentationModule:
