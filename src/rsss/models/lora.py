@@ -22,14 +22,32 @@ computes the same function.
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
-from typing import Any
+from collections.abc import Iterator, Sequence
+from typing import Any, Protocol
 
 import torch
 from torch import Tensor, nn
 
 #: Attention's linear maps, the layers DINOv3's LoRA fine-tuning adapts.
 DEFAULT_TARGETS = ("attn.qkv", "attn.proj")
+
+
+class _Module(Protocol):
+    """The slice of ``nn.Module`` these helpers rely on.
+
+    Typed structurally so a backbone described by a protocol -- as DINOv3's
+    is in :mod:`rsss.models.dinov3` -- can be passed without a cast.
+    """
+
+    def named_modules(self) -> Iterator[tuple[str, nn.Module]]: ...
+
+    def modules(self) -> Iterator[nn.Module]: ...
+
+    def get_submodule(self, target: str) -> nn.Module: ...
+
+    def parameters(self) -> Iterator[nn.Parameter]: ...
+
+    def named_parameters(self) -> Iterator[tuple[str, nn.Parameter]]: ...
 
 
 class LoRALinear(nn.Module):
@@ -129,7 +147,7 @@ def _matches(name: str, target: str) -> bool:
 
 
 def apply_lora(
-    model: nn.Module,
+    model: _Module,
     targets: Sequence[str] = DEFAULT_TARGETS,
     rank: int = 16,
     alpha: float = 32.0,
@@ -198,12 +216,12 @@ def apply_lora(
     return adapters
 
 
-def lora_modules(model: nn.Module) -> list[LoRALinear]:
+def lora_modules(model: _Module) -> list[LoRALinear]:
     """Return the LoRA wrappers inside ``model``, in module order."""
     return [module for module in model.modules() if isinstance(module, LoRALinear)]
 
 
-def lora_parameters(model: nn.Module) -> list[nn.Parameter]:
+def lora_parameters(model: _Module) -> list[nn.Parameter]:
     """Return the adapter parameters inside ``model``, in module order."""
     return [
         parameter
