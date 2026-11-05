@@ -4,7 +4,7 @@ __pycache__/
 # --- Virtual environments ---
 .venv/
 venv/
-# The PANDO stack runs in its own environment, see the README.
+# The PANDO stack runs in its own environment, see COMMANDS.md.
 .venv-pando/
 
 # --- Tool caches ---

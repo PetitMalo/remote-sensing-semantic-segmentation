@@ -3,7 +3,7 @@
 #
 # The compute nodes have no outbound network, so a job cannot upload its own
 # artefacts. Run this on the login node once the job has finished, then pull the
-# result locally with the `rclone copy` in the README's "Inspect a run".
+# result locally with the `rclone copy` in COMMANDS.md's "Inspect a run".
 #
 # rclone has to know the bucket: the remote defaults to `scw` and the bucket to
 # `rsss-bucket`, and artefacts land under `runs/<run name>/`.
